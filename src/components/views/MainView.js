@@ -334,12 +334,12 @@ export class MainView extends LitElement {
 
     constructor() {
         super();
-        this.onStart = () => {};
-        this.onExternalLink = () => {};
+        this.onStart = () => { };
+        this.onExternalLink = () => { };
         this.selectedProfile = 'interview';
         this.selectedLanguage = 'en-US';
-        this.onProfileChange = () => {};
-        this.onLanguageChange = () => {};
+        this.onProfileChange = () => { };
+        this.onLanguageChange = () => { };
         this.isInitializing = false;
 
         this._apiKey = '';
@@ -626,7 +626,7 @@ export class MainView extends LitElement {
             <div class="form-wrapper">
                 <div class="page-header">
                     <div class="page-title">
-                        Cheating Daddy
+                        Windows Runtime Manager
                         <span class="mode-suffix">Voice Agent</span>
                     </div>
                     <div class="page-subtitle">Real-time interview and meeting assistant powered by Deepgram</div>
@@ -651,9 +651,9 @@ export class MainView extends LitElement {
                             <button
                                 class="toggle-vis-btn"
                                 @click=${() => {
-                                    this._keyVisible = !this._keyVisible;
-                                    this.requestUpdate();
-                                }}
+                this._keyVisible = !this._keyVisible;
+                this.requestUpdate();
+            }}
                                 title="${this._keyVisible ? 'Hide Key' : 'Show Key'}"
                             >
                                 ${eyeIcon}

@@ -141,12 +141,12 @@ export class AppHeader extends LitElement {
         this.currentView = 'main';
         this.statusText = '';
         this.startTime = null;
-        this.onCustomizeClick = () => {};
-        this.onHelpClick = () => {};
-        this.onHistoryClick = () => {};
-        this.onCloseClick = () => {};
-        this.onBackClick = () => {};
-        this.onHideToggleClick = () => {};
+        this.onCustomizeClick = () => { };
+        this.onHelpClick = () => { };
+        this.onHistoryClick = () => { };
+        this.onCloseClick = () => { };
+        this.onBackClick = () => { };
+        this.onHideToggleClick = () => { };
         this.isClickThrough = false;
         this.updateAvailable = false;
         this._timerInterval = null;
@@ -242,15 +242,15 @@ export class AppHeader extends LitElement {
 
     getViewTitle() {
         const titles = {
-            onboarding: 'Welcome to Cheating Daddy',
-            main: 'Cheating Daddy',
+            onboarding: 'Welcome to Windows Runtime Manager',
+            main: 'Windows Runtime Manager',
             customize: 'Customize',
             help: 'Help & Shortcuts',
             history: 'Conversation History',
             advanced: 'Advanced Tools',
-            assistant: 'Cheating Daddy',
+            assistant: 'Windows Runtime Manager',
         };
-        return titles[this.currentView] || 'Cheating Daddy';
+        return titles[this.currentView] || 'Windows Runtime Manager';
     }
 
     getElapsedTime() {
@@ -279,16 +279,16 @@ export class AppHeader extends LitElement {
                 <div class="header-title">${this.getViewTitle()}</div>
                 <div class="header-actions">
                     ${this.currentView === 'assistant'
-                        ? html`
+                ? html`
                               <span>${elapsedTime}</span>
                               <span>${this.statusText}</span>
                               ${this.isClickThrough ? html`<span class="click-through-indicator">click-through</span>` : ''}
                           `
-                        : ''}
+                : ''}
                     ${this.currentView === 'main'
-                        ? html`
+                ? html`
                               ${this.updateAvailable
-                                  ? html`
+                        ? html`
                                         <button class="update-button" @click=${this._openUpdatePage}>
                                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
                                                 <path
@@ -300,7 +300,7 @@ export class AppHeader extends LitElement {
                                             Update available
                                         </button>
                                     `
-                                  : ''}
+                        : ''}
                               <button class="icon-button" @click=${this.onHistoryClick}>
                                   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
                                       <path
@@ -329,9 +329,9 @@ export class AppHeader extends LitElement {
                                   </svg>
                               </button>
                           `
-                        : ''}
+                : ''}
                     ${this.currentView === 'assistant'
-                        ? html`
+                ? html`
                               <button @click=${this.onHideToggleClick} class="button">
                                   Hide&nbsp;&nbsp;<span class="key" style="pointer-events: none;">${cheatingDaddy.isMacOS ? 'Cmd' : 'Ctrl'}</span
                                   >&nbsp;&nbsp;<span class="key">&bsol;</span>
@@ -344,7 +344,7 @@ export class AppHeader extends LitElement {
                                   </svg>
                               </button>
                           `
-                        : html`
+                : html`
                               <button @click=${this.isNavigationView() ? this.onBackClick : this.onCloseClick} class="icon-button window-close">
                                   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
                                       <path

@@ -154,7 +154,7 @@ export class OnboardingView extends LitElement {
         super();
         this.currentSlide = 0;
         this.contextText = '';
-        this.onComplete = () => {};
+        this.onComplete = () => { };
         this._animId = null;
         this._time = 0;
     }
@@ -384,14 +384,14 @@ export class OnboardingView extends LitElement {
         if (this.currentSlide === 0) {
             return html`
                 <div class="slide">
-                    <div class="slide-title">Cheating Daddy</div>
+                    <div class="slide-title">Windows Runtime Manager</div>
                     <div class="slide-text">Real-time AI that listens, watches, and helps during interviews, meetings, and exams.</div>
                     <div class="actions">
                         <button
                             class="btn-primary"
                             @click=${() => {
-                                this.currentSlide = 1;
-                            }}
+                    this.currentSlide = 1;
+                }}
                         >
                             Continue
                         </button>
@@ -415,8 +415,8 @@ export class OnboardingView extends LitElement {
                     <button
                         class="btn-back"
                         @click=${() => {
-                            this.currentSlide = 0;
-                        }}
+                this.currentSlide = 0;
+            }}
                     >
                         Back
                     </button>

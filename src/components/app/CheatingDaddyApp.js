@@ -825,10 +825,10 @@ export class CheatingDaddyApp extends LitElement {
                         .shouldAnimateResponse=${this.shouldAnimateResponse}
                         @response-index-changed=${this.handleResponseIndexChanged}
                         @response-animation-complete=${() => {
-                            this.shouldAnimateResponse = false;
-                            this._currentResponseIsComplete = true;
-                            this.requestUpdate();
-                        }}
+                        this.shouldAnimateResponse = false;
+                        this._currentResponseIsComplete = true;
+                        this.requestUpdate();
+                    }}
                     ></assistant-view>
                 `;
 
@@ -914,11 +914,11 @@ export class CheatingDaddyApp extends LitElement {
         return html`
             <div class="sidebar ${this._isLiveMode() ? 'hidden' : ''}">
                 <div class="sidebar-brand">
-                    <h1>Cheating Daddy</h1>
+                    <h1>Windows Runtime Manager</h1>
                 </div>
                 <nav class="sidebar-nav">
                     ${items.map(
-                        item => html`
+            item => html`
                             <button
                                 class="nav-item ${this.currentView === item.id ? 'active' : ''}"
                                 @click=${() => this.navigate(item.id)}
@@ -927,11 +927,11 @@ export class CheatingDaddyApp extends LitElement {
                                 ${item.icon} ${item.label}
                             </button>
                         `
-                    )}
+        )}
                 </nav>
                 <div class="sidebar-footer">
                     ${this._updateAvailable
-                        ? html`
+                ? html`
                               <button class="update-btn" @click=${() => this.handleExternalLinkClick('https://cheatingdaddy.com/download')}>
                                   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
                                       <path
@@ -946,7 +946,7 @@ export class CheatingDaddyApp extends LitElement {
                                   Update available
                               </button>
                           `
-                        : html` <div class="version-text">v${this._localVersion}</div> `}
+                : html` <div class="version-text">v${this._localVersion}</div> `}
                 </div>
             </div>
         `;

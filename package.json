@@ -1,6 +1,6 @@
 {
-    "name": "cheating-daddy",
-    "productName": "cheating-daddy",
+    "name": "windows-runtime-manager",
+    "productName": "Windows Runtime Manager",
     "version": "0.8.0",
     "description": "cheating daddy",
     "main": "src/index.js",

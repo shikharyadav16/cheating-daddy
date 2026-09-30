@@ -1,5 +1,5 @@
 // renderer.js
-const { ipcRenderer } = require('electron');
+const { ipcRenderer, webFrame } = require('electron');
 
 let mediaStream = null;
 let micStream = null;
@@ -18,6 +18,30 @@ let currentImageQuality = 'medium'; // Store current image quality for manual sc
 
 const isLinux = process.platform === 'linux';
 const isMacOS = process.platform === 'darwin';
+
+// Reset visual zoom on startup and support Ctrl/Cmd + Mouse Wheel zooming
+try {
+    webFrame.setZoomFactor(1.0);
+} catch (e) {
+    console.warn('Failed to set initial zoom factor:', e);
+}
+
+window.addEventListener(
+    'wheel',
+    e => {
+        const modifier = isMacOS ? e.metaKey : e.ctrlKey;
+        if (modifier) {
+            e.preventDefault();
+            const currentZoom = webFrame.getZoomFactor();
+            if (e.deltaY < 0) {
+                webFrame.setZoomFactor(Math.min(currentZoom + 0.05, 3.0));
+            } else if (e.deltaY > 0) {
+                webFrame.setZoomFactor(Math.max(currentZoom - 0.05, 0.4));
+            }
+        }
+    },
+    { passive: false }
+);
 
 // ============ STORAGE API ============
 // Wrapper for IPC-based storage access
@@ -305,7 +329,9 @@ async function startRealAudioCapture() {
 
     try {
         if (isMacOS) {
-            await ipcRenderer.invoke('start-macos-audio');
+            if (wantSystem) {
+                await ipcRenderer.invoke('start-macos-audio');
+            }
             if (wantMic && !micStream) {
                 try {
                     micStream = await navigator.mediaDevices.getUserMedia({
@@ -324,7 +350,29 @@ async function startRealAudioCapture() {
                 }
             }
         } else {
-            // Windows and Linux
+            // Windows and Linux: Ensure system audio loopback stream is acquired if wanted
+            if (wantSystem && (!mediaStream || mediaStream.getAudioTracks().length === 0)) {
+                try {
+                    console.log('[Capture] Acquiring Windows system audio loopback stream for meeting/speaker capture...');
+                    if (mediaStream) {
+                        try {
+                            mediaStream.getTracks().forEach(t => t.stop());
+                        } catch (e) {}
+                    }
+                    mediaStream = await navigator.mediaDevices.getDisplayMedia({
+                        video: {
+                            frameRate: 1,
+                            width: { ideal: 1920 },
+                            height: { ideal: 1080 },
+                        },
+                        audio: true,
+                    });
+                    console.log('[Capture] System loopback audio acquired. Audio tracks:', mediaStream.getAudioTracks().length);
+                } catch (sysErr) {
+                    console.warn('[Capture] Failed to acquire system audio loopback stream:', sysErr.message);
+                }
+            }
+
             if (wantMic && !micStream) {
                 try {
                     micStream = await navigator.mediaDevices.getUserMedia({
@@ -370,16 +418,33 @@ async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'mediu
     currentImageQuality = imageQuality;
 
     try {
-        if (!mediaStream) {
-            mediaStream = await navigator.mediaDevices.getDisplayMedia({
-                video: {
-                    frameRate: 1,
-                    width: { ideal: 1920 },
-                    height: { ideal: 1080 },
-                },
-                audio: false,
-            });
-            console.log('[Capture] Display stream acquired for background screen intelligence');
+        if (!mediaStream || mediaStream.getAudioTracks().length === 0) {
+            if (mediaStream) {
+                try {
+                    mediaStream.getTracks().forEach(t => t.stop());
+                } catch (e) {}
+            }
+            try {
+                mediaStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: {
+                        frameRate: 1,
+                        width: { ideal: 1920 },
+                        height: { ideal: 1080 },
+                    },
+                    audio: true,
+                });
+                console.log('[Capture] Display & Loopback system audio stream acquired. Audio tracks:', mediaStream.getAudioTracks().length);
+            } catch (err) {
+                console.warn('[Capture] getDisplayMedia with audio failed, falling back to video only:', err.message);
+                mediaStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: {
+                        frameRate: 1,
+                        width: { ideal: 1920 },
+                        height: { ideal: 1080 },
+                    },
+                    audio: false,
+                });
+            }
         }
         if (screenshotInterval) clearInterval(screenshotInterval);
         screenshotInterval = setInterval(() => {
@@ -409,6 +474,11 @@ async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'mediu
 });
 
 async function setupAudioProcessing() {
+    await loadPreferencesCache();
+    const rawMode = (preferencesCache.audioMode || 'both').toLowerCase();
+    const wantMic = rawMode === 'both' || rawMode === 'mic_and_speaker' || rawMode === 'mic_only';
+    const wantSystem = rawMode === 'both' || rawMode === 'mic_and_speaker' || rawMode === 'speaker_only';
+
     if (audioProcessor) {
         try {
             audioProcessor.disconnect();
@@ -440,23 +510,29 @@ async function setupAudioProcessing() {
 
     let hasInputs = false;
 
-    // Connect system audio track if present
-    if (mediaStream && mediaStream.getAudioTracks().length > 0) {
+    // Connect system audio track if present and wanted
+    if (wantSystem && mediaStream && mediaStream.getAudioTracks().length > 0) {
         try {
             const sysSource = audioContext.createMediaStreamSource(mediaStream);
-            sysSource.connect(audioProcessor);
+            const sysGain = audioContext.createGain();
+            sysGain.gain.value = 1.0;
+            sysSource.connect(sysGain);
+            sysGain.connect(audioProcessor);
             hasInputs = true;
-            console.log('[Audio] System audio source connected to mixer');
+            console.log('[Audio] System/Meeting loopback audio source connected to mixer');
         } catch (e) {
             console.warn('[Audio] Failed to connect system audio source:', e);
         }
     }
 
-    // Connect microphone track if present
-    if (micStream && micStream.getAudioTracks().length > 0) {
+    // Connect microphone track if present and wanted
+    if (wantMic && micStream && micStream.getAudioTracks().length > 0) {
         try {
             const micSource = audioContext.createMediaStreamSource(micStream);
-            micSource.connect(audioProcessor);
+            const micGain = audioContext.createGain();
+            micGain.gain.value = 1.0;
+            micSource.connect(micGain);
+            micGain.connect(audioProcessor);
             hasInputs = true;
             console.log('[Audio] Microphone source connected to mixer');
         } catch (e) {
@@ -465,7 +541,7 @@ async function setupAudioProcessing() {
     }
 
     if (!hasInputs) {
-        console.warn('[Audio] No active audio tracks to process');
+        console.warn('[Audio] No active audio tracks to process. Audio mode:', rawMode);
         return;
     }
 
@@ -496,7 +572,7 @@ async function setupAudioProcessing() {
     audioProcessor.connect(muteGain);
     muteGain.connect(audioContext.destination);
 
-    console.log('[Audio] Unified audio mixer running at 48000 Hz');
+    console.log('[Audio] Unified audio mixer running at 48000 Hz. wantSystem:', wantSystem, 'wantMic:', wantMic);
 }
 
 async function captureScreenshot(imageQuality = 'medium', isManual = false) {

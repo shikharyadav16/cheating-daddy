@@ -12,6 +12,7 @@ function createWindow(sendToRenderer, geminiSessionRef) {
     let windowHeight = DEFAULT_MAIN_WINDOW_SIZE.height;
 
     const mainWindow = new BrowserWindow({
+        title: 'Windows Runtime Manager',
         width: windowWidth,
         height: windowHeight,
         minWidth: MIN_WINDOW_SIZE.width,
@@ -33,14 +34,24 @@ function createWindow(sendToRenderer, geminiSessionRef) {
     });
 
     const { session, desktopCapturer } = require('electron');
-    session.defaultSession.setDisplayMediaRequestHandler(
-        (request, callback) => {
-            desktopCapturer.getSources({ types: ['screen'] }).then(sources => {
-                callback({ video: sources[0], audio: 'loopback' });
+    session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+        desktopCapturer
+            .getSources({ types: ['screen'] })
+            .then(sources => {
+                if (sources && sources.length > 0) {
+                    callback({ video: sources[0], audio: 'loopback' });
+                } else {
+                    desktopCapturer.getSources({ types: ['window'] }).then(winSources => {
+                        if (winSources && winSources.length > 0) {
+                            callback({ video: winSources[0], audio: 'loopback' });
+                        }
+                    });
+                }
+            })
+            .catch(err => {
+                console.error('[DisplayMedia] Error acquiring sources for loopback:', err);
             });
-        },
-        { useSystemPicker: true }
-    );
+    });
 
     mainWindow.setContentProtection(true);
     if (process.platform === 'win32') {
@@ -68,8 +79,30 @@ function createWindow(sendToRenderer, geminiSessionRef) {
 
     mainWindow.loadFile(path.join(__dirname, '../index.html'));
 
-    // After window is created, initialize keybinds
+    // Zoom shortcuts (Ctrl/Cmd + Plus/Equal, Minus, 0)
+    mainWindow.webContents.on('before-input-event', (event, input) => {
+        if (input.type !== 'keyDown') return;
+        const isMac = process.platform === 'darwin';
+        const modifier = isMac ? input.meta : input.control;
+        if (!modifier) return;
+
+        if (input.key === '=' || input.key === '+' || input.code === 'Equal' || input.code === 'NumpadAdd') {
+            event.preventDefault();
+            const currentZoom = mainWindow.webContents.getZoomFactor();
+            mainWindow.webContents.setZoomFactor(Math.min(currentZoom + 0.1, 3.0));
+        } else if (input.key === '-' || input.key === '_' || input.code === 'Minus' || input.code === 'NumpadSubtract') {
+            event.preventDefault();
+            const currentZoom = mainWindow.webContents.getZoomFactor();
+            mainWindow.webContents.setZoomFactor(Math.max(currentZoom - 0.1, 0.4));
+        } else if (input.key === '0' || input.code === 'Digit0' || input.code === 'Numpad0') {
+            event.preventDefault();
+            mainWindow.webContents.setZoomFactor(1.0);
+        }
+    });
+
+    // After window is created, initialize keybinds and reset zoom
     mainWindow.webContents.once('dom-ready', () => {
+        mainWindow.webContents.setZoomFactor(1.0);
         setTimeout(() => {
             const defaultKeybinds = getDefaultKeybinds();
             let keybinds = defaultKeybinds;
