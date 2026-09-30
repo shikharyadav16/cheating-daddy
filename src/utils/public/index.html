@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cheating Daddy - Voice Agent</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d26;
+            --border: #2e3346;
+            --primary: #6366f1;
+            --primary-hover: #4f46e5;
+            --text: #f3f4f6;
+            --text-dim: #9ca3af;
+            --user: #3b82f6;
+            --assistant: #10b981;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        header {
+            padding: 16px 24px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        h1 { font-size: 18px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+        .badge {
+            font-size: 12px;
+            padding: 3px 8px;
+            border-radius: 12px;
+            background: rgba(99, 102, 241, 0.15);
+            color: var(--primary);
+        }
+        #status {
+            font-size: 13px;
+            color: var(--text-dim);
+        }
+        #messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .msg {
+            max-width: 80%;
+            padding: 12px 16px;
+            border-radius: 10px;
+            line-height: 1.5;
+            font-size: 14px;
+        }
+        .msg.user {
+            align-self: flex-end;
+            background: var(--user);
+            color: #fff;
+            border-bottom-right-radius: 2px;
+        }
+        .msg.assistant {
+            align-self: flex-start;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-bottom-left-radius: 2px;
+        }
+        .msg.system {
+            align-self: center;
+            font-size: 12px;
+            color: var(--text-dim);
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 20px;
+            padding: 6px 14px;
+        }
+        footer {
+            padding: 16px 24px;
+            background: var(--surface);
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 12px;
+        }
+        input[type="text"] {
+            flex: 1;
+            padding: 10px 14px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            font-size: 14px;
+            outline: none;
+        }
+        input[type="text"]:focus {
+            border-color: var(--primary);
+        }
+        button {
+            padding: 10px 18px;
+            background: var(--primary);
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover { background: var(--primary-hover); }
+        button.mic-btn.active { background: #ef4444; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Cheating Daddy <span class="badge">Voice Agent</span></h1>
+        <div id="status">Connecting to server...</div>
+    </header>
+    <div id="messages">
+        <div class="msg system">Connected to Deepgram Voice Agent. Speak or type a message.</div>
+    </div>
+    <footer>
+        <button id="micBtn" class="mic-btn">🎙️ Start Mic</button>
+        <input type="text" id="textInput" placeholder="Type a message or prompt..." />
+        <button id="sendBtn">Send</button>
+    </footer>
+
+    <script>
+        const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+        const messagesEl = document.getElementById('messages');
+        const statusEl = document.getElementById('status');
+        const micBtn = document.getElementById('micBtn');
+        const textInput = document.getElementById('textInput');
+        const sendBtn = document.getElementById('sendBtn');
+
+        let isRecording = false;
+        let audioContext = null;
+        let audioProcessor = null;
+        let mediaStream = null;
+
+        function addMessage(role, text) {
+            const div = document.createElement('div');
+            div.className = 'msg ' + role;
+            div.textContent = text;
+            messagesEl.appendChild(div);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        ws.onopen = () => {
+            statusEl.textContent = 'Server connected';
+        };
+
+        ws.onmessage = (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'Ready') {
+                    statusEl.textContent = '🟢 Deepgram Voice Agent Ready';
+                } else if (msg.type === 'ConversationText') {
+                    addMessage(msg.role, msg.content);
+                } else if (msg.type === 'AgentThinking') {
+                    statusEl.textContent = '🤔 Agent thinking...';
+                } else if (msg.type === 'UserStartedSpeaking') {
+                    statusEl.textContent = '🎙️ Listening...';
+                } else if (msg.type === 'Error' || msg.type === 'Warning') {
+                    statusEl.textContent = '⚠️ ' + (msg.description || msg.type);
+                }
+            } catch (e) {}
+        };
+
+        ws.onclose = () => {
+            statusEl.textContent = '🔴 Disconnected';
+        };
+
+        sendBtn.onclick = sendMessage;
+        textInput.onkeydown = (e) => { if (e.key === 'Enter') sendMessage(); };
+
+        function sendMessage() {
+            const text = textInput.value.trim();
+            if (!text) return;
+            textInput.value = '';
+            addMessage('user', text);
+            ws.send(JSON.stringify({ type: 'InjectUserMessage', content: text }));
+        }
+
+        micBtn.onclick = async () => {
+            if (!isRecording) {
+                try {
+                    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 48000, channelCount: 1 } });
+                    audioContext = new AudioContext({ sampleRate: 48000 });
+                    const source = audioContext.createMediaStreamSource(mediaStream);
+                    audioProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                    audioProcessor.onaudioprocess = (e) => {
+                        if (!isRecording) return;
+                        const inputData = e.inputBuffer.getChannelData(0);
+                        const pcm16 = new Int16Array(inputData.length);
+                        for (let i = 0; i < inputData.length; i++) {
+                            const s = Math.max(-1, Math.min(1, inputData[i]));
+                            pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                        }
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.send(pcm16.buffer);
+                        }
+                    };
+
+                    source.connect(audioProcessor);
+                    audioProcessor.connect(audioContext.destination);
+
+                    isRecording = true;
+                    micBtn.textContent = '⏹️ Stop Mic';
+                    micBtn.classList.add('active');
+                    statusEl.textContent = '🎙️ Microphone streaming (48kHz linear16)';
+                } catch (err) {
+                    alert('Mic error: ' + err.message);
+                }
+            } else {
+                isRecording = false;
+                micBtn.textContent = '🎙️ Start Mic';
+                micBtn.classList.remove('active');
+                if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+                if (audioContext) audioContext.close();
+                statusEl.textContent = 'Mic stopped';
+            }
+        };
+    </script>
+</body>
+</html>
