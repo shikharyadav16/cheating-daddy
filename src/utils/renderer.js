@@ -212,9 +212,10 @@ function stopSilenceStream() {
 }
 
 async function initializeGemini(profile = 'interview', language = 'en-US') {
-    const apiKey = await storage.getApiKey();
-    if (apiKey && apiKey.trim()) {
-        const prefs = await storage.getPreferences();
+    const apiKey = (await storage.getApiKey()) || '';
+    const prefs = (await storage.getPreferences()) || {};
+    const backendUrl = prefs.backendUrl || 'http://13.233.70.37:3000';
+    if ((apiKey && apiKey.trim()) || backendUrl) {
         const success = await ipcRenderer.invoke('initialize-gemini', apiKey, prefs.customPrompt || '', profile, language);
         if (success) {
             wsConnected = true;

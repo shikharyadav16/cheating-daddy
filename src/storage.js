@@ -27,6 +27,7 @@ const DEFAULT_PREFERENCES = {
     backgroundTransparency: 0.8,
     googleSearchEnabled: false,
     autoListening: true,
+    backendUrl: 'http://13.233.70.37:3000',
 };
 
 const DEFAULT_KEYBINDS = null; // null means use system defaults
@@ -392,6 +393,18 @@ function clearAllData() {
     return true;
 }
 
+function getBackendUrl() {
+    if (process.env.BACKEND_URL && process.env.BACKEND_URL.trim()) {
+        return process.env.BACKEND_URL.trim();
+    }
+    const prefs = getPreferences();
+    return prefs.backendUrl || 'http://13.233.70.37:3000';
+}
+
+function setBackendUrl(url) {
+    return updatePreference('backendUrl', url);
+}
+
 module.exports = {
     initializeStorage,
     getConfigDir,
@@ -424,4 +437,6 @@ module.exports = {
     deleteSession,
     deleteAllSessions,
     clearAllData,
+    getBackendUrl,
+    setBackendUrl,
 };

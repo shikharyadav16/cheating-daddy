@@ -653,8 +653,10 @@ export class CheatingDaddyApp extends LitElement {
     // ── Session start ──
 
     async handleStart() {
-        const apiKey = await cheatingDaddy.storage.getApiKey();
-        if (!apiKey || apiKey.trim() === '') {
+        const apiKey = (await cheatingDaddy.storage.getApiKey()) || '';
+        const prefs = (await cheatingDaddy.storage.getPreferences()) || {};
+        const backendUrl = prefs.backendUrl || 'http://13.233.70.37:3000';
+        if ((!apiKey || apiKey.trim() === '') && !backendUrl) {
             const mainView = this.shadowRoot.querySelector('main-view');
             if (mainView && mainView.triggerApiKeyError) {
                 mainView.triggerApiKeyError();

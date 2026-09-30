@@ -188,6 +188,7 @@ export class CustomizeView extends LitElement {
         autoListening: { type: Boolean },
         liveTranscriptionModel: { type: String },
         availableModels: { type: Array },
+        backendUrl: { type: String },
         onProfileChange: { type: Function },
         onLanguageChange: { type: Function },
         onImageQualityChange: { type: Function },
@@ -222,6 +223,7 @@ export class CustomizeView extends LitElement {
         this.availableModels = [];
         this.customPrompt = '';
         this.theme = 'dark';
+        this.backendUrl = 'http://13.233.70.37:3000';
         this._loadFromStorage();
     }
 
@@ -240,6 +242,7 @@ export class CustomizeView extends LitElement {
             this.liveTranscriptionModel = prefs.liveTranscriptionModel || 'ggml-large-v3-turbo';
             this.customPrompt = prefs.customPrompt ?? '';
             this.theme = prefs.theme ?? 'dark';
+            this.backendUrl = prefs.backendUrl || 'http://13.233.70.37:3000';
             if (keybinds) {
                 this.keybinds = { ...this.getDefaultKeybinds(), ...keybinds };
             }
@@ -429,6 +432,12 @@ export class CustomizeView extends LitElement {
         if (typeof cheatingDaddy.setLiveTranscriptionModel === 'function') {
             await cheatingDaddy.setLiveTranscriptionModel(this.liveTranscriptionModel);
         }
+        this.requestUpdate();
+    }
+
+    async handleBackendUrlChange(e) {
+        this.backendUrl = e.target.value.trim();
+        await cheatingDaddy.storage.updatePreference('backendUrl', this.backendUrl);
         this.requestUpdate();
     }
 
@@ -665,6 +674,19 @@ export class CustomizeView extends LitElement {
                             <option value="medium">Medium Quality</option>
                             <option value="low">Low Quality</option>
                         </select>
+                    </div>
+                    <div class="form-group" style="grid-column: 1 / -1;">
+                        <label class="form-label">Backend Server URL</label>
+                        <input
+                            type="text"
+                            class="control"
+                            .value=${this.backendUrl}
+                            placeholder="http://13.233.70.37:3000"
+                            @change=${this.handleBackendUrlChange}
+                        />
+                        <div style="font-size: var(--font-size-xs); color: var(--text-secondary); margin-top: 4px;">
+                            Remote backend agent server IP/URL for speech-to-text and AI reasoning.
+                        </div>
                     </div>
                     <div style="grid-column: 1 / -1; margin-top: var(--space-xs);">
                         <div class="toggle-row">

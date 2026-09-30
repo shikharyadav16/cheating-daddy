@@ -72,7 +72,7 @@ function buildSettingsMessage(promptText) {
         },
         agent: {
             speak: {
-                provider: { type: 'deepgram', version: 'v2', model: 'flux-kit-en' },
+                provider: { type: 'deepgram', version: 'v2', model: 'flux-kit-en', speed: 1.5 },
             },
             listen: {
                 provider: { type: 'deepgram', version: 'v2', model: 'flux-general-en' },
@@ -85,7 +85,39 @@ function buildSettingsMessage(promptText) {
     };
 }
 
-// Global active Deepgram connection for Electron app & WS clients
+function getEffectiveBackendWsUrl(overrideUrl) {
+    let url = overrideUrl || process.env.BACKEND_WS_URL || process.env.BACKEND_URL;
+    if (!url) {
+        try {
+            if (storage && typeof storage.getBackendUrl === 'function') {
+                url = storage.getBackendUrl();
+            } else if (storage && typeof storage.getPreferences === 'function') {
+                const prefs = storage.getPreferences();
+                if (prefs && prefs.backendUrl) url = prefs.backendUrl;
+            }
+        } catch (e) {}
+    }
+    if (!url) {
+        url = 'http://13.233.70.37:3000';
+    }
+    url = url.trim().replace(/\/+$/, '');
+    if (url.startsWith('https://')) {
+        return url.replace(/^https:\/\//, 'wss://');
+    }
+    if (url.startsWith('http://')) {
+        return url.replace(/^http:\/\//, 'ws://');
+    }
+    if (url.startsWith('ws://') || url.startsWith('wss://')) {
+        return url;
+    }
+    return `ws://${url}`;
+}
+
+// Global active backend connection (for client mode)
+let activeBackendWs = null;
+let clientPingTimer = null;
+
+// Global active Deepgram connection (for server mode / direct fallback)
 let activeDeepgramWs = null;
 let activeKeepAliveTimer = null;
 let wsConnected = false;
@@ -386,8 +418,203 @@ function startServer() {
     }
 }
 
-// Automatically start server on module load
-startServer();
+// Automatically start server only if in server mode or run directly as script
+const isServerMode = process.env.SERVER_MODE === 'true' || require.main === module;
+if (isServerMode) {
+    startServer();
+}
+
+// ─── Backend WebSocket Client (for connecting to remote backend e.g. 13.233.70.37:3000) ───
+
+async function startBackendClient(backendWsUrl, options = {}) {
+    if (activeBackendWs && activeBackendWs.readyState === WebSocket.OPEN && activeSettingsApplied) {
+        console.log('ℹ️ [LiveTranscription] Backend connection already active');
+        return true;
+    }
+
+    stopTranscription();
+    isConnecting = true;
+    activeSettingsApplied = false;
+    wsConnected = false;
+
+    console.log(`🔌 [LiveTranscription] Connecting to remote backend at ${backendWsUrl}...`);
+
+    return new Promise(resolve => {
+        let isResolved = false;
+        const finish = result => {
+            if (!isResolved) {
+                isResolved = true;
+                resolve(result);
+            }
+        };
+
+        const timeout = setTimeout(() => {
+            if (!activeSettingsApplied) {
+                console.warn('[LiveTranscription] Connection to backend timed out (10s)');
+                finish(false);
+            }
+        }, 10000);
+
+        try {
+            const ws = new WebSocket(backendWsUrl);
+            activeBackendWs = ws;
+
+            ws.on('open', () => {
+                console.log(`✅ [LiveTranscription] Connected to remote backend at ${backendWsUrl}`);
+                if (activeCallbacks.onLog) activeCallbacks.onLog(`Connected to backend: ${backendWsUrl}`);
+
+                // Send start initialization message
+                const apiKey = getEffectiveApiKey(options.apiKey || options.sttApiKey);
+                const prompt = options.systemPrompt || getProjectSystemPrompt(options.profile, options.customPrompt);
+
+                try {
+                    ws.send(
+                        JSON.stringify({
+                            type: 'start',
+                            apiKey,
+                            prompt,
+                            profile: options.profile,
+                            customPrompt: options.customPrompt,
+                        })
+                    );
+                } catch (e) {
+                    console.error('[LiveTranscription] Failed to send start message:', e);
+                }
+
+                if (clientPingTimer) clearInterval(clientPingTimer);
+                clientPingTimer = setInterval(() => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        try {
+                            ws.ping();
+                        } catch (e) {}
+                    }
+                }, 10000);
+            });
+
+            ws.on('message', (data, isBinary) => {
+                if (isBinary) {
+                    // Audio playback from server is disabled per requirement
+                    return;
+                }
+
+                let message;
+                try {
+                    message = JSON.parse(data.toString());
+                } catch {
+                    return;
+                }
+
+                if (message.type !== 'LatencyReport') {
+                    console.log('[Backend → App]', message.type);
+                }
+
+                switch (message.type) {
+                    case 'Ready': {
+                        activeSettingsApplied = true;
+                        wsConnected = true;
+                        isConnecting = false;
+                        isSessionActive = true;
+                        clearTimeout(timeout);
+                        if (activeCallbacks.onLog) activeCallbacks.onLog('Backend Voice Agent Ready');
+                        finish(true);
+                        break;
+                    }
+
+                    case 'ConversationText': {
+                        if (message.role === 'user') {
+                            if (activeCallbacks.onUserTranscript) {
+                                activeCallbacks.onUserTranscript(message.content);
+                            }
+                        } else if (message.role === 'assistant') {
+                            if (activeCallbacks.onAssistantResponse) {
+                                activeCallbacks.onAssistantResponse(message.content);
+                            }
+                        }
+                        break;
+                    }
+
+                    case 'AgentThinking': {
+                        if (activeCallbacks.onThinking) {
+                            activeCallbacks.onThinking(message.content || 'Thinking...');
+                        }
+                        break;
+                    }
+
+                    case 'UserStartedSpeaking': {
+                        if (activeCallbacks.onUserStartedSpeaking) {
+                            activeCallbacks.onUserStartedSpeaking();
+                        }
+                        break;
+                    }
+
+                    case 'EndOfTurn':
+                    case 'EagerEndOfTurn': {
+                        if (activeCallbacks.onThinking) {
+                            activeCallbacks.onThinking('Processing...');
+                        }
+                        break;
+                    }
+
+                    case 'AgentAudioDone': {
+                        if (activeCallbacks.onAgentDone) {
+                            activeCallbacks.onAgentDone();
+                        }
+                        break;
+                    }
+
+                    case 'Error':
+                    case 'Warning': {
+                        console.error(`[Backend ${message.type}]:`, message.description || message.code || message);
+                        if (activeCallbacks.onError) {
+                            activeCallbacks.onError(message.description || message.type);
+                        }
+                        break;
+                    }
+
+                    case 'Disconnected': {
+                        activeSettingsApplied = false;
+                        wsConnected = false;
+                        isSessionActive = false;
+                        isConnecting = false;
+                        if (activeCallbacks.onStopped) {
+                            activeCallbacks.onStopped();
+                        }
+                        break;
+                    }
+
+                    default:
+                        break;
+                }
+            });
+
+            ws.on('error', err => {
+                console.error('[LiveTranscription] Backend WS Error:', err.message);
+                if (activeCallbacks.onError) {
+                    activeCallbacks.onError(`Backend WS Error: ${err.message}`);
+                }
+                finish(false);
+            });
+
+            ws.on('close', (code, reason) => {
+                console.log(`[LiveTranscription] Backend WS closed (${code} ${reason})`);
+                if (clientPingTimer) clearInterval(clientPingTimer);
+                clientPingTimer = null;
+                activeSettingsApplied = false;
+                wsConnected = false;
+                isSessionActive = false;
+                isConnecting = false;
+                activeBackendWs = null;
+                if (activeCallbacks.onStopped) {
+                    activeCallbacks.onStopped(code);
+                }
+                finish(false);
+            });
+        } catch (err) {
+            console.error('[LiveTranscription] Exception creating backend WS:', err);
+            finish(false);
+        }
+    });
+}
 
 // ─── Module Interface for Cheating Daddy Desktop App ─────────────────────────
 
@@ -408,15 +635,21 @@ function ensure48kPcm(buffer, sampleRate = 48000) {
 }
 
 async function startTranscription(options = {}, callbacks = {}) {
-    startServer();
-
     if (callbacks) {
         activeCallbacks = { ...activeCallbacks, ...callbacks };
     }
 
+    const backendWsUrl = getEffectiveBackendWsUrl(options.backendUrl);
+    if (backendWsUrl) {
+        const connected = await startBackendClient(backendWsUrl, options);
+        if (connected) return true;
+        console.warn(`[LiveTranscription] Could not connect to remote backend at ${backendWsUrl}. Checking local fallback...`);
+    }
+
+    // Direct Deepgram connection fallback
     const apiKey = getEffectiveApiKey(options.apiKey || options.sttApiKey);
     if (!apiKey) {
-        console.error('❌ [LiveTranscription] Deepgram API Key not configured!');
+        console.error('❌ [LiveTranscription] Deepgram API Key not configured and backend unreachable!');
         if (activeCallbacks.onError) activeCallbacks.onError('Deepgram API key not configured');
         return false;
     }
@@ -450,33 +683,58 @@ async function startTranscription(options = {}, callbacks = {}) {
 }
 
 function sendAudio(pcmBuffer, sampleRate = 48000) {
-    if (!activeDeepgramWs || activeDeepgramWs.readyState !== WebSocket.OPEN || !activeSettingsApplied) {
+    const audio48k = ensure48kPcm(pcmBuffer, sampleRate);
+    if (!audio48k || audio48k.length === 0) return;
+
+    if (activeBackendWs && activeBackendWs.readyState === WebSocket.OPEN) {
+        try {
+            activeBackendWs.send(audio48k);
+        } catch (e) {
+            console.error('[SendAudio to Backend Error]:', e.message);
+        }
         return;
     }
-    try {
-        const audio48k = ensure48kPcm(pcmBuffer, sampleRate);
-        activeDeepgramWs.send(audio48k);
-    } catch (e) {
-        console.error('[SendAudio Error]:', e.message);
+
+    if (activeDeepgramWs && activeDeepgramWs.readyState === WebSocket.OPEN && activeSettingsApplied) {
+        try {
+            activeDeepgramWs.send(audio48k);
+        } catch (e) {
+            console.error('[SendAudio Error]:', e.message);
+        }
     }
 }
 
 function sendTextMessage(content) {
-    if (!activeDeepgramWs || activeDeepgramWs.readyState !== WebSocket.OPEN) {
-        return false;
+    if (activeBackendWs && activeBackendWs.readyState === WebSocket.OPEN) {
+        try {
+            activeBackendWs.send(
+                JSON.stringify({
+                    type: 'InjectUserMessage',
+                    content,
+                })
+            );
+            return true;
+        } catch (e) {
+            console.error('[SendTextMessage to Backend Error]:', e.message);
+            return false;
+        }
     }
-    try {
-        activeDeepgramWs.send(
-            JSON.stringify({
-                type: 'InjectUserMessage',
-                content,
-            })
-        );
-        return true;
-    } catch (e) {
-        console.error('[SendTextMessage Error]:', e.message);
-        return false;
+
+    if (activeDeepgramWs && activeDeepgramWs.readyState === WebSocket.OPEN) {
+        try {
+            activeDeepgramWs.send(
+                JSON.stringify({
+                    type: 'InjectUserMessage',
+                    content,
+                })
+            );
+            return true;
+        } catch (e) {
+            console.error('[SendTextMessage Error]:', e.message);
+            return false;
+        }
     }
+    return false;
 }
 
 function finalizeTranscription() {
@@ -485,6 +743,19 @@ function finalizeTranscription() {
 }
 
 function stopTranscription() {
+    if (clientPingTimer) {
+        clearInterval(clientPingTimer);
+        clientPingTimer = null;
+    }
+    if (activeBackendWs) {
+        try {
+            if (activeBackendWs.readyState === WebSocket.OPEN) {
+                activeBackendWs.send(JSON.stringify({ type: 'stop' }));
+            }
+        } catch (e) {}
+        safeClose(activeBackendWs);
+        activeBackendWs = null;
+    }
     if (activeKeepAliveTimer) {
         clearInterval(activeKeepAliveTimer);
         activeKeepAliveTimer = null;
@@ -503,6 +774,11 @@ function stopTranscription() {
 function setLiveState(enabled) {
     liveEnabled = Boolean(enabled);
     console.log(`[Deepgram Agent] Live state: ${liveEnabled ? 'LIVE ON (Microphone Active)' : 'LIVE OFF (Silence Stream)'}`);
+    if (activeBackendWs && activeBackendWs.readyState === WebSocket.OPEN) {
+        try {
+            activeBackendWs.send(JSON.stringify({ type: 'LiveState', liveEnabled, wsConnected }));
+        } catch (e) {}
+    }
     broadcastToBrowsers({ type: 'LiveState', liveEnabled, wsConnected });
     return liveEnabled;
 }
@@ -512,11 +788,14 @@ function isLiveEnabled() {
 }
 
 function isWsConnected() {
+    if (activeBackendWs) {
+        return Boolean(wsConnected && activeBackendWs.readyState === WebSocket.OPEN);
+    }
     return Boolean(wsConnected && activeDeepgramWs && activeDeepgramWs.readyState === WebSocket.OPEN);
 }
 
 function isAvailable() {
-    return Boolean(getEffectiveApiKey());
+    return Boolean(getEffectiveBackendWsUrl() || getEffectiveApiKey());
 }
 
 function getStatus() {
@@ -527,6 +806,7 @@ function getStatus() {
         isConnecting,
         settingsApplied: activeSettingsApplied,
         hasApiKey: isAvailable(),
+        backendUrl: getEffectiveBackendWsUrl(),
         port: PORT,
     };
 }
@@ -562,4 +842,5 @@ module.exports = {
     shutdown,
     getEffectiveApiKey,
     getProjectSystemPrompt,
+    getEffectiveBackendWsUrl,
 };

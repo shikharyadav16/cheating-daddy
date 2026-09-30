@@ -329,6 +329,7 @@ export class MainView extends LitElement {
         _keyVisible: { state: true },
         _keyError: { state: true },
         _audioMode: { state: true },
+        _backendUrl: { state: true },
     };
 
     constructor() {
@@ -345,6 +346,7 @@ export class MainView extends LitElement {
         this._keyVisible = false;
         this._keyError = false;
         this._audioMode = 'both';
+        this._backendUrl = 'http://13.233.70.37:3000';
 
         this._animId = null;
         this._time = 0;
@@ -365,6 +367,7 @@ export class MainView extends LitElement {
             if (prefs.selectedProfile) this.selectedProfile = prefs.selectedProfile;
             if (prefs.selectedLanguage) this.selectedLanguage = prefs.selectedLanguage;
             if (prefs.audioMode) this._audioMode = prefs.audioMode;
+            if (prefs.backendUrl) this._backendUrl = prefs.backendUrl;
             this.requestUpdate();
         } catch (e) {
             console.error('Error loading MainView storage:', e);
@@ -519,7 +522,10 @@ export class MainView extends LitElement {
     _handleStart() {
         if (this.isInitializing) return;
 
-        if (!this._apiKey || !this._apiKey.trim()) {
+        const hasBackend = Boolean(this._backendUrl && this._backendUrl.trim());
+        const hasKey = Boolean(this._apiKey && this._apiKey.trim());
+
+        if (!hasBackend && !hasKey) {
             this._keyError = true;
             this.requestUpdate();
             return;
@@ -727,8 +733,8 @@ export class MainView extends LitElement {
                             <span class="engine-value">Gemini 3.1 Flash Lite</span>
                         </div>
                         <div class="engine-row">
-                            <span class="engine-label">Local Server Bridge</span>
-                            <span class="engine-value">http://localhost:3000</span>
+                            <span class="engine-label">Backend Server</span>
+                            <span class="engine-value">${this._backendUrl || 'http://13.233.70.37:3000'}</span>
                         </div>
                     </div>
                 </div>

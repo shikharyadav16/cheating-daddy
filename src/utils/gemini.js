@@ -202,10 +202,12 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
         return false;
     }
 
-    const effectiveKey = apiKey || getApiKey();
-    if (!effectiveKey) {
-        console.error('Deepgram API key is not configured');
-        sendToRenderer('update-status', 'Error: No Deepgram API key configured');
+    const prefs = getPreferences();
+    const effectiveKey = apiKey || getApiKey() || '';
+    const backendUrl = prefs.backendUrl || process.env.BACKEND_URL || 'http://13.233.70.37:3000';
+    if (!effectiveKey && !backendUrl) {
+        console.error('Deepgram API key or backend URL is not configured');
+        sendToRenderer('update-status', 'Error: No Deepgram API key or backend URL configured');
         return false;
     }
 
@@ -216,7 +218,6 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
     currentCustomPrompt = customPrompt || '';
 
     // Build the system prompt present in the project
-    const prefs = getPreferences();
     const searchEnabled = prefs.googleSearchEnabled ?? false;
     currentSystemPrompt = getSystemPrompt(currentProfile, currentCustomPrompt, searchEnabled);
 
@@ -226,6 +227,7 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
     const started = await liveTranscription.startTranscription(
         {
             apiKey: effectiveKey,
+            backendUrl: backendUrl,
             systemPrompt: currentSystemPrompt,
             profile: currentProfile,
             customPrompt: currentCustomPrompt,
