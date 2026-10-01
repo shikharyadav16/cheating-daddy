@@ -7,9 +7,7 @@ let screenshotInterval = null;
 let audioContext = null;
 let audioProcessor = null;
 let audioBuffer = [];
-const SAMPLE_RATE = 48000;
-const AUDIO_CHUNK_DURATION = 0.1; // seconds
-const BUFFER_SIZE = 4096; // Increased buffer size for smoother audio
+const BUFFER_SIZE = 1024; // ~21ms buffer at 48kHz for ultra-low latency
 
 let hiddenVideo = null;
 let offscreenCanvas = null;
@@ -216,13 +214,11 @@ function startSilenceStream() {
             stopSilenceStream();
             return;
         }
-        ipcRenderer
-            .invoke('send-audio-content', {
-                data: silenceBuffer.buffer,
-                isSilence: true,
-                mimeType: 'audio/pcm;rate=48000',
-            })
-            .catch(() => {});
+        ipcRenderer.send('send-audio-content', {
+            data: silenceBuffer.buffer,
+            isSilence: true,
+            mimeType: 'audio/pcm;rate=48000',
+        });
     }, 100);
     console.log('[Audio] Silence PCM stream started (Live OFF, WebSocket Connected)');
 }
@@ -508,25 +504,13 @@ async function setupAudioProcessing() {
 
     audioProcessor = audioContext.createScriptProcessor(BUFFER_SIZE, 1, 1);
 
-    let hasInputs = false;
+    // Separate STT audio source to avoid summing both into Deepgram:
+    // In 'speaker_only' mode, STT listens to the meeting/speaker loopback.
+    // In 'both' or 'mic_only' mode, STT listens exclusively to the microphone.
+    const sttWantsMic = rawMode === 'mic_only' || rawMode === 'both' || rawMode === 'mic_and_speaker';
+    const sttWantsSystem = rawMode === 'speaker_only' && !sttWantsMic;
 
-    // Connect system audio track if present and wanted
-    if (wantSystem && mediaStream && mediaStream.getAudioTracks().length > 0) {
-        try {
-            const sysSource = audioContext.createMediaStreamSource(mediaStream);
-            const sysGain = audioContext.createGain();
-            sysGain.gain.value = 1.0;
-            sysSource.connect(sysGain);
-            sysGain.connect(audioProcessor);
-            hasInputs = true;
-            console.log('[Audio] System/Meeting loopback audio source connected to mixer');
-        } catch (e) {
-            console.warn('[Audio] Failed to connect system audio source:', e);
-        }
-    }
-
-    // Connect microphone track if present and wanted
-    if (wantMic && micStream && micStream.getAudioTracks().length > 0) {
+    if (sttWantsMic && micStream && micStream.getAudioTracks().length > 0) {
         try {
             const micSource = audioContext.createMediaStreamSource(micStream);
             const micGain = audioContext.createGain();
@@ -534,9 +518,21 @@ async function setupAudioProcessing() {
             micSource.connect(micGain);
             micGain.connect(audioProcessor);
             hasInputs = true;
-            console.log('[Audio] Microphone source connected to mixer');
+            console.log('[Audio] Dedicated Microphone source connected to STT audioProcessor');
         } catch (e) {
             console.warn('[Audio] Failed to connect microphone source:', e);
+        }
+    } else if (sttWantsSystem && mediaStream && mediaStream.getAudioTracks().length > 0) {
+        try {
+            const sysSource = audioContext.createMediaStreamSource(mediaStream);
+            const sysGain = audioContext.createGain();
+            sysGain.gain.value = 1.0;
+            sysSource.connect(sysGain);
+            sysGain.connect(audioProcessor);
+            hasInputs = true;
+            console.log('[Audio] System/Meeting loopback audio source connected to STT audioProcessor (speaker_only mode)');
+        } catch (e) {
+            console.warn('[Audio] Failed to connect system audio source:', e);
         }
     }
 
@@ -556,13 +552,11 @@ async function setupAudioProcessing() {
             pcmData16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
         }
 
-        // Send binary buffer directly across Electron IPC
-        ipcRenderer
-            .invoke('send-audio-content', {
-                data: pcmData16.buffer,
-                mimeType: 'audio/pcm;rate=48000',
-            })
-            .catch(() => {});
+        // Send binary buffer directly across Electron IPC asynchronously without invoke overhead
+        ipcRenderer.send('send-audio-content', {
+            data: pcmData16.buffer,
+            mimeType: 'audio/pcm;rate=48000',
+        });
     };
 
     // Route through mute gain node to destination so Chromium keeps running

@@ -57,8 +57,10 @@ function setAutoListening(enabled) {
 
 function sendToRenderer(channel, data) {
     const windows = BrowserWindow.getAllWindows();
-    if (windows.length > 0) {
-        windows[0].webContents.send(channel, data);
+    for (const win of windows) {
+        if (!win.isDestroyed()) {
+            win.webContents.send(channel, data);
+        }
     }
 }
 
@@ -113,7 +115,7 @@ function initializeNewSession(profile = null, customPrompt = null) {
 }
 
 function formatFullTurn(question, chunks) {
-    const answerBody = chunks.join('\n\n');
+    const answerBody = Array.isArray(chunks) ? chunks.join('\n\n') : chunks || '';
     if (question && question.trim()) {
         return `### 🎙️ ${question.trim()}\n\n${answerBody}`;
     }
@@ -233,69 +235,61 @@ async function initializeGeminiSession(apiKey, customPrompt = '', profile = 'int
             customPrompt: currentCustomPrompt,
         },
         {
-            onUserTranscript: text => {
+            onUserTranscript: (text, isFinal) => {
                 if (!text || !wsConnected) return;
-                isUserSpeaking = false;
+
                 lastUserTranscript = text.trim();
-                console.log(`[Voice Agent] User: "${lastUserTranscript}"`);
+
                 sendToRenderer('live-transcript', {
                     text: lastUserTranscript,
-                    buffer: lastUserTranscript,
                     timestamp: new Date().toISOString(),
-                    isFinal: true,
+                    isFinal: Boolean(isFinal),
                 });
-                sendToRenderer('update-status', `🎙️ Heard: "${lastUserTranscript}"`);
-                startNewQuestionTurn(lastUserTranscript);
+
+                if (isFinal) {
+                    isUserSpeaking = false;
+                    console.log(`[Voice Agent] Committed Staged: "${lastUserTranscript}"`);
+                    sendToRenderer('staged-voice-text', lastUserTranscript);
+                    sendToRenderer('update-status', `🎙️ Staged: "${lastUserTranscript}" — Click "Send to Groq"`);
+                } else {
+                    sendToRenderer('update-status', `🎙️ ${lastUserTranscript}`);
+                }
             },
             onAssistantResponse: responseText => {
-                if (!responseText || !wsConnected) return;
+                if (!responseText) return;
 
-                // Requirement 2: If user is speaking, discard any leftover chunks from previous questions
-                if (isUserSpeaking) {
-                    console.log(`[Voice Agent] User is speaking; discarding leftover chunk: "${responseText}"`);
-                    return;
-                }
+                const answer = responseText.trim();
+                if (!answer) return;
 
-                const chunk = responseText.trim();
-                if (!chunk) return;
-
-                // Avoid duplicate chunk
-                if (currentQuestionChunks.includes(chunk)) {
-                    console.log(`[Voice Agent] Dropping duplicate chunk: "${chunk}"`);
-                    return;
-                }
-
-                if (!currentQuestionText && currentQuestionChunks.length === 0) {
+                if (!currentQuestionText) {
                     currentQuestionText = 'Question';
-                    currentTurnEpoch++;
                 }
 
-                currentQuestionChunks.push(chunk);
-                console.log(`[Voice Agent] Assistant chunk #${currentQuestionChunks.length} for turn #${currentTurnEpoch}: "${chunk}"`);
-
+                currentQuestionChunks = [answer];
                 const fullFormatted = formatFullTurn(currentQuestionText, currentQuestionChunks);
                 sendToRenderer('update-response', fullFormatted);
-                saveConversationTurn(currentQuestionText, currentQuestionChunks.join('\n\n'));
-                sendToRenderer('update-status', getIdleStatusMessage());
+                saveConversationTurn(currentQuestionText, answer);
+                sendToRenderer('update-status', '⚡ Answering...');
             },
-            onAgentAudio: audioBuffer => {
-                // Requirement 3: Voice audio output to user is disabled per user request
-            },
+            onAgentAudio: audioBuffer => {},
             onThinking: content => {
-                if (!wsConnected || isUserSpeaking) return;
-                sendToRenderer('update-status', 'Agent thinking...');
+                sendToRenderer('update-status', content || 'Thinking...');
             },
             onUserStartedSpeaking: () => {
                 if (!wsConnected) return;
-                console.log('[Voice Agent] 🎙️ User started speaking...');
+                console.log('[Voice] 🎙️ User started speaking...');
                 isUserSpeaking = true;
-                currentTurnEpoch++; // Invalidate any older in-flight chunks
                 sendToRenderer('update-status', '🎙️ Listening to you speak...');
-                sendToRenderer('agent-interrupted');
             },
-            onAgentDone: () => {
-                if (!wsConnected || isUserSpeaking) return;
-                console.log('[Voice Agent] Turn completed');
+            onAgentDone: finalResponse => {
+                console.log('[Groq] Response completed');
+                if (finalResponse && typeof finalResponse === 'string' && finalResponse.trim()) {
+                    const answer = finalResponse.trim();
+                    currentQuestionChunks = [answer];
+                    const fullFormatted = formatFullTurn(currentQuestionText || 'Question', currentQuestionChunks);
+                    sendToRenderer('update-response', fullFormatted);
+                    saveConversationTurn(currentQuestionText || 'Question', answer);
+                }
                 sendToRenderer('update-status', getIdleStatusMessage());
             },
             onError: err => {
@@ -467,10 +461,8 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
         return false;
     });
 
-    ipcMain.handle('send-audio-content', async (event, payload) => {
-        if (!payload || !payload.data) return { success: false, error: 'Invalid audio data' };
-        if (!wsConnected) return { success: true, ignored: true };
-
+    const handleAudioPayload = payload => {
+        if (!payload || !payload.data || !wsConnected) return;
         try {
             let pcmBuffer;
             if (Buffer.isBuffer(payload.data)) {
@@ -482,14 +474,19 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
             } else if (typeof payload.data === 'string') {
                 pcmBuffer = Buffer.from(payload.data, 'base64');
             } else {
-                return { success: false, error: 'Unsupported audio data format' };
+                return;
             }
-
             processGeminiBatchAudio(pcmBuffer, Boolean(payload.isSilence));
-            return { success: true };
-        } catch (error) {
-            return { success: false, error: error.message };
-        }
+        } catch (error) {}
+    };
+
+    ipcMain.on('send-audio-content', (event, payload) => {
+        handleAudioPayload(payload);
+    });
+
+    ipcMain.handle('send-audio-content', async (event, payload) => {
+        handleAudioPayload(payload);
+        return { success: true };
     });
 
     ipcMain.handle('send-mic-audio-content', async (event, payload) => {
@@ -649,7 +646,11 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
     ipcMain.handle('live-transcription:get-models', async () => {
         return {
             success: true,
-            models: [{ id: 'gemini-3.1-flash-lite', name: 'Deepgram Agent (Gemini 3.1 Flash Lite)' }],
+            models: [
+                { id: 'openai/gpt-oss-120b', name: 'Groq: GPT-OSS 120B (High Quality)' },
+                { id: 'qwen/qwen3.8-27b', name: 'Groq: Qwen 3.8 27B (Ultra Fast)' },
+                { id: 'openai/gpt-oss-20b', name: 'Groq: GPT-OSS 20B (Fast)' },
+            ],
         };
     });
 

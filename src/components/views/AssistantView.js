@@ -377,6 +377,55 @@ export class AssistantView extends LitElement {
                 box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
             }
         }
+
+        .send-groq-btn {
+            position: relative;
+            background: var(--accent);
+            border: 1px solid var(--accent);
+            color: #ffffff;
+            cursor: pointer;
+            font-size: var(--font-size-xs);
+            font-family: var(--font-mono);
+            white-space: nowrap;
+            padding: var(--space-xs) var(--space-md);
+            border-radius: 100px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: all var(--transition);
+            flex-shrink: 0;
+            font-weight: var(--font-weight-medium);
+        }
+
+        .send-groq-btn:hover:not(.disabled) {
+            background: var(--accent-hover);
+            border-color: var(--accent-hover);
+        }
+
+        .send-groq-btn.disabled,
+        .send-groq-btn[disabled] {
+            opacity: 0.4;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+
+        .clear-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 13px;
+            padding: 2px 6px;
+            border-radius: var(--radius-sm);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .clear-btn:hover {
+            color: var(--text-primary);
+        }
     `;
 
     static properties = {
@@ -389,6 +438,8 @@ export class AssistantView extends LitElement {
         isRecordingVoice: { type: Boolean, state: true },
         liveEnabled: { type: Boolean, state: true },
         wsConnected: { type: Boolean, state: true },
+        stagedText: { type: String, state: true },
+        livePreviewText: { type: String, state: true },
     };
 
     constructor() {
@@ -401,6 +452,8 @@ export class AssistantView extends LitElement {
         this.isRecordingVoice = false;
         this.liveEnabled = false;
         this.wsConnected = false;
+        this.stagedText = '';
+        this.livePreviewText = '';
         if (typeof window !== 'undefined' && window.cheatingDaddy) {
             if (typeof window.cheatingDaddy.isLiveEnabled === 'function') {
                 this.liveEnabled = window.cheatingDaddy.isLiveEnabled();
@@ -411,7 +464,44 @@ export class AssistantView extends LitElement {
         }
         this.handleManualVoiceState = null;
         this.handleLiveStateChanged = null;
+        this.handleLiveTranscript = null;
+        this.handleStagedVoiceText = null;
         this._animFrame = null;
+    }
+
+    setLivePreview(text) {
+        this.livePreviewText = (text || '').trim();
+        const textInput = this.shadowRoot?.querySelector('#textInput');
+        if (textInput) {
+            textInput.value = this.getCurrentInputValue();
+        }
+        this.requestUpdate();
+    }
+
+    setStagedText(text) {
+        this.livePreviewText = '';
+        const clean = (text || '').trim();
+        if (clean) {
+            if (this.stagedText && this.stagedText.trim()) {
+                this.stagedText = `${this.stagedText.trim()} ${clean}`;
+            } else {
+                this.stagedText = clean;
+            }
+        }
+        const textInput = this.shadowRoot?.querySelector('#textInput');
+        if (textInput) {
+            textInput.value = this.stagedText || '';
+        }
+        this.requestUpdate();
+    }
+
+    getCurrentInputValue() {
+        const staged = (this.stagedText || '').trim();
+        const preview = (this.livePreviewText || '').trim();
+        if (staged && preview) {
+            return `${staged} ${preview}`;
+        }
+        return preview || staged || '';
     }
 
     getProfileNames() {
@@ -554,6 +644,27 @@ export class AssistantView extends LitElement {
             ipcRenderer.on('scroll-response-down', this.handleScrollDown);
             ipcRenderer.on('manual-voice-state', this.handleManualVoiceState);
             ipcRenderer.on('toggle-voice-record', this.handleToggleVoiceRecord);
+
+            this.handleLiveTranscript = (_, data) => {
+                const text = (data?.text || '').trim();
+                if (!text) return;
+                if (data.isFinal) {
+                    this.setStagedText(text);
+                } else {
+                    this.setLivePreview(text);
+                }
+            };
+            ipcRenderer.on('live-transcript', this.handleLiveTranscript);
+
+            this.handleStagedVoiceText = (_, text) => {
+                const clean = (text || '').trim();
+                if (!clean) return;
+                if (this.stagedText && this.stagedText.trim().endsWith(clean)) {
+                    return;
+                }
+                this.setStagedText(clean);
+            };
+            ipcRenderer.on('staged-voice-text', this.handleStagedVoiceText);
         }
     }
 
@@ -574,16 +685,29 @@ export class AssistantView extends LitElement {
             if (this.handleScrollDown) ipcRenderer.removeListener('scroll-response-down', this.handleScrollDown);
             if (this.handleManualVoiceState) ipcRenderer.removeListener('manual-voice-state', this.handleManualVoiceState);
             if (this.handleToggleVoiceRecord) ipcRenderer.removeListener('toggle-voice-record', this.handleToggleVoiceRecord);
+            if (this.handleLiveTranscript) ipcRenderer.removeListener('live-transcript', this.handleLiveTranscript);
+            if (this.handleStagedVoiceText) ipcRenderer.removeListener('staged-voice-text', this.handleStagedVoiceText);
         }
     }
 
     async handleSendText() {
         const textInput = this.shadowRoot.querySelector('#textInput');
-        if (textInput && textInput.value.trim()) {
-            const message = textInput.value.trim();
-            textInput.value = '';
+        const message = (this.getCurrentInputValue() || (textInput ? textInput.value : '')).trim();
+        if (message) {
+            this.stagedText = '';
+            this.livePreviewText = '';
+            if (textInput) textInput.value = '';
+            this.requestUpdate();
             await this.onSendText(message);
         }
+    }
+
+    handleClearText() {
+        this.stagedText = '';
+        this.livePreviewText = '';
+        const textInput = this.shadowRoot.querySelector('#textInput');
+        if (textInput) textInput.value = '';
+        this.requestUpdate();
     }
 
     handleTextKeydown(e) {
@@ -849,8 +973,33 @@ export class AssistantView extends LitElement {
 
             <div class="input-bar">
                 <div class="input-bar-inner">
-                    <input type="text" id="textInput" placeholder="Type a message..." @keydown=${this.handleTextKeydown} />
+                    <input
+                        type="text"
+                        id="textInput"
+                        placeholder="Speak or type a question..."
+                        .value=${this.getCurrentInputValue()}
+                        @input=${e => {
+                            this.stagedText = e.target.value;
+                            this.livePreviewText = '';
+                            this.requestUpdate();
+                        }}
+                        @keydown=${this.handleTextKeydown}
+                    />
+                    ${this.getCurrentInputValue()
+                        ? html` <button class="clear-btn" @click=${this.handleClearText} title="Clear temporary question">✕</button> `
+                        : ''}
                 </div>
+                <button
+                    class="send-groq-btn ${!this.getCurrentInputValue() ? 'disabled' : ''}"
+                    @click=${this.handleSendText}
+                    ?disabled=${!this.getCurrentInputValue()}
+                    title="Send to Groq (Enter)"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                    </svg>
+                    <span>Send to Groq</span>
+                </button>
                 <button
                     class="live-btn voice-btn ${this.liveEnabled ? 'live-on recording' : ''}"
                     @click=${this.handleLiveToggle}

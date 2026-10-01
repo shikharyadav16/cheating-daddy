@@ -28,6 +28,7 @@ const DEFAULT_PREFERENCES = {
     googleSearchEnabled: false,
     autoListening: true,
     backendUrl: 'http://13.233.70.37:3000',
+    liveTranscriptionModel: 'qwen/qwen3.8-27b',
 };
 
 const DEFAULT_KEYBINDS = null; // null means use system defaults
@@ -184,7 +185,7 @@ function setCredentials(credentials) {
 
 function getApiKey() {
     const creds = getCredentials();
-    return creds.apiKey || creds.deepgramApiKey || creds.sttApiKey || process.env.DEEPGRAM_API_KEY || process.env.STT_KEY || '';
+    return creds.deepgramApiKey || creds.sttApiKey || process.env.STT_KEY || process.env.DEEPGRAM_API_KEY || creds.apiKey || '';
 }
 
 function setApiKey(apiKey) {
@@ -216,6 +217,10 @@ function getPreferences() {
     const prefs = { ...DEFAULT_PREFERENCES, ...saved };
     if (prefs.autoListening === undefined || saved.autoListening === undefined) {
         prefs.autoListening = true;
+    }
+    const VALID_GROQ_MODELS = ['qwen/qwen3.8-27b', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b'];
+    if (!prefs.liveTranscriptionModel || !VALID_GROQ_MODELS.includes(prefs.liveTranscriptionModel)) {
+        prefs.liveTranscriptionModel = 'qwen/qwen3.8-27b';
     }
     return prefs;
 }
@@ -283,11 +288,11 @@ function incrementCharUsage() {
 }
 
 function getAvailableModel() {
-    return 'gemini-3.1-flash-lite';
+    return 'openai/gpt-oss-120b';
 }
 
 function getModelForToday() {
-    return 'gemini-3.1-flash-lite';
+    return 'openai/gpt-oss-120b';
 }
 
 // ============ HISTORY ============

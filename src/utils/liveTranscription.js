@@ -1,6 +1,16 @@
+const dns = require('dns');
+try {
+    if (typeof dns.setDefaultResultOrder === 'function') {
+        dns.setDefaultResultOrder('ipv4first');
+    }
+} catch (e) {
+    console.warn('⚠️ [DNS] Could not set ipv4first result order:', e.message);
+}
+
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const WebSocket = require('ws');
 const path = require('path');
 const fs = require('fs');
@@ -9,7 +19,18 @@ const storage = require('../storage');
 const { getSystemPrompt } = require('./prompts');
 
 const PORT = process.env.PORT || 3000;
-const DEEPGRAM_WS_URL = 'wss://agent.deepgram.com/v1/agent/converse';
+const DEEPGRAM_STT_URL =
+    'wss://api.deepgram.com/v1/listen?model=nova-3&smart_format=false&interim_results=true&endpointing=100&utterance_end_ms=1000&vad_events=true&encoding=linear16&sample_rate=48000';
+
+const VALID_GROQ_MODELS = ['qwen/qwen3.8-27b', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b'];
+const DEFAULT_GROQ_MODEL = 'qwen/qwen3.8-27b';
+
+const groqHttpsAgent = new https.Agent({
+    family: 4,
+    keepAlive: true,
+    keepAliveMsecs: 10000,
+    timeout: 30000,
+});
 
 const app = express();
 app.use(cors());
@@ -31,23 +52,53 @@ wss.on('error', err => {
     }
 });
 
+// ─── Key Helpers ─────────────────────────────────────────────────────────────
+
 function getEffectiveApiKey(overrideKey) {
     if (overrideKey && typeof overrideKey === 'string' && overrideKey.trim()) {
-        return overrideKey.trim();
-    }
-    try {
-        if (storage && typeof storage.getApiKey === 'function') {
-            const key = storage.getApiKey();
-            if (key && key.trim()) return key.trim();
-        }
-    } catch (e) {}
-    if (process.env.DEEPGRAM_API_KEY && process.env.DEEPGRAM_API_KEY.trim()) {
-        return process.env.DEEPGRAM_API_KEY.trim();
+        const trimmed = overrideKey.trim();
+        if (!trimmed.startsWith('AQ.')) return trimmed;
     }
     if (process.env.STT_KEY && process.env.STT_KEY.trim()) {
         return process.env.STT_KEY.trim();
     }
+    if (process.env.DEEPGRAM_API_KEY && process.env.DEEPGRAM_API_KEY.trim()) {
+        return process.env.DEEPGRAM_API_KEY.trim();
+    }
+    try {
+        if (storage && typeof storage.getApiKey === 'function') {
+            const key = storage.getApiKey();
+            if (key && key.trim() && !key.trim().startsWith('AQ.')) return key.trim();
+        }
+    } catch (e) {}
     return '';
+}
+
+function getEffectiveGroqKey() {
+    if (process.env.GROQ_KEY && process.env.GROQ_KEY.trim()) {
+        return process.env.GROQ_KEY.trim();
+    }
+    try {
+        if (storage && typeof storage.getPreferences === 'function') {
+            const prefs = storage.getPreferences();
+            if (prefs && prefs.groqApiKey && prefs.groqApiKey.trim()) {
+                return prefs.groqApiKey.trim();
+            }
+        }
+    } catch (e) {}
+    return '';
+}
+
+function getSelectedGroqModel() {
+    try {
+        if (storage && typeof storage.getPreferences === 'function') {
+            const prefs = storage.getPreferences();
+            if (prefs && prefs.liveTranscriptionModel && VALID_GROQ_MODELS.includes(prefs.liveTranscriptionModel.trim())) {
+                return prefs.liveTranscriptionModel.trim();
+            }
+        }
+    } catch (e) {}
+    return DEFAULT_GROQ_MODEL;
 }
 
 function getProjectSystemPrompt(profile, customPrompt) {
@@ -63,71 +114,18 @@ function getProjectSystemPrompt(profile, customPrompt) {
     }
 }
 
-function buildSettingsMessage(promptText) {
-    return {
-        type: 'Settings',
-        audio: {
-            input: { encoding: 'linear16', sample_rate: 48000 },
-            output: { encoding: 'linear16', sample_rate: 24000, container: 'none' },
-        },
-        agent: {
-            speak: {
-                provider: { type: 'deepgram', version: 'v2', model: 'flux-kit-en', speed: 1.5 },
-            },
-            listen: {
-                provider: { type: 'deepgram', version: 'v2', model: 'flux-general-en' },
-            },
-            think: {
-                provider: { type: 'google', model: 'gemini-3.1-flash-lite' },
-                prompt: promptText || getProjectSystemPrompt(),
-            },
-        },
-    };
-}
+// ─── Active Session State ───────────────────────────────────────────────────
 
-function getEffectiveBackendWsUrl(overrideUrl) {
-    let url = overrideUrl || process.env.BACKEND_WS_URL || process.env.BACKEND_URL;
-    if (!url) {
-        try {
-            if (storage && typeof storage.getBackendUrl === 'function') {
-                url = storage.getBackendUrl();
-            } else if (storage && typeof storage.getPreferences === 'function') {
-                const prefs = storage.getPreferences();
-                if (prefs && prefs.backendUrl) url = prefs.backendUrl;
-            }
-        } catch (e) {}
-    }
-    if (!url) {
-        url = 'http://13.233.70.37:3000';
-    }
-    url = url.trim().replace(/\/+$/, '');
-    if (url.startsWith('https://')) {
-        return url.replace(/^https:\/\//, 'wss://');
-    }
-    if (url.startsWith('http://')) {
-        return url.replace(/^http:\/\//, 'ws://');
-    }
-    if (url.startsWith('ws://') || url.startsWith('wss://')) {
-        return url;
-    }
-    return `ws://${url}`;
-}
-
-// Global active backend connection (for client mode)
-let activeBackendWs = null;
-let clientPingTimer = null;
-
-// Global active Deepgram connection (for server mode / direct fallback)
 let activeDeepgramWs = null;
 let activeKeepAliveTimer = null;
 let wsConnected = false;
 let liveEnabled = false;
 let isSessionActive = false;
 let isConnecting = false;
-let activeSettingsApplied = false;
 let currentPrompt = '';
+let accumulatedTranscript = '';
+let currentGroqReq = null;
 
-// Active callbacks for Electron main process / gemini.js
 let activeCallbacks = {
     onUserTranscript: null,
     onAssistantResponse: null,
@@ -140,7 +138,6 @@ let activeCallbacks = {
     onStopped: null,
 };
 
-// Connected browser WS clients
 const browserClients = new Set();
 
 function broadcastToBrowsers(payload) {
@@ -165,199 +162,326 @@ function safeClose(ws) {
     } catch (e) {}
 }
 
-/**
- * Connect to Deepgram Voice Agent WebSocket
- */
-function createDeepgramConnection(apiKey, promptText) {
+// ─── Groq Streaming Response Engine ──────────────────────────────────────────
+
+function abortGroq() {
+    if (currentGroqReq) {
+        try {
+            currentGroqReq._aborted = true;
+            currentGroqReq.destroy();
+        } catch (e) {}
+        currentGroqReq = null;
+    }
+}
+
+function streamGroqResponse(questionText) {
+    abortGroq();
+
+    const groqKey = getEffectiveGroqKey();
+    if (!groqKey) {
+        console.error('❌ [Groq] GROQ_KEY not found in .env or storage!');
+        if (activeCallbacks.onError) activeCallbacks.onError('Groq API Key not found');
+        return;
+    }
+
+    const cleanQuestion = (questionText || '').trim();
+    if (!cleanQuestion) return;
+
+    const systemPrompt = currentPrompt || getProjectSystemPrompt();
+    const model = getSelectedGroqModel();
+
+    console.log(`⚡ [Groq] Streaming response for "${cleanQuestion}" using [${model}]...`);
+    if (activeCallbacks.onThinking) {
+        activeCallbacks.onThinking('Groq answering...');
+    }
+
+    const payload = {
+        model: model,
+        messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: cleanQuestion },
+        ],
+        stream: true,
+        temperature: 0.4,
+        max_completion_tokens: 2048,
+    };
+    if (model.includes('gpt-oss')) {
+        payload.reasoning_effort = 'low';
+    }
+    const postData = JSON.stringify(payload);
+
+    let accumulatedText = '';
+
+    const req = https.request(
+        'https://api.groq.com/openai/v1/chat/completions',
+        {
+            method: 'POST',
+            agent: groqHttpsAgent,
+            headers: {
+                Authorization: `Bearer ${groqKey}`,
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(postData),
+            },
+        },
+        res => {
+            if (res.statusCode !== 200) {
+                let errBody = '';
+                res.on('data', chunk => (errBody += chunk));
+                res.on('end', () => {
+                    console.error(`[Groq Error ${res.statusCode}]:`, errBody);
+                    if (activeCallbacks.onError) activeCallbacks.onError(`Groq Error: ${res.statusCode}`);
+                    if (activeCallbacks.onAgentDone) activeCallbacks.onAgentDone();
+                });
+                return;
+            }
+
+            let buffer = '';
+            res.on('data', chunk => {
+                buffer += chunk.toString();
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (trimmed.startsWith('data: ') && trimmed !== 'data: [DONE]') {
+                        try {
+                            const parsed = JSON.parse(trimmed.slice(6));
+                            const delta = parsed.choices?.[0]?.delta;
+                            if (delta?.content) {
+                                accumulatedText += delta.content;
+                                if (activeCallbacks.onAssistantResponse) {
+                                    activeCallbacks.onAssistantResponse(accumulatedText);
+                                }
+                            } else if (delta?.reasoning && !accumulatedText && activeCallbacks.onThinking) {
+                                activeCallbacks.onThinking('Thinking...');
+                            }
+                        } catch (e) {}
+                    }
+                }
+            });
+
+            res.on('end', () => {
+                currentGroqReq = null;
+                console.log(`✅ [Groq] Response completed (${accumulatedText.split(/\s+/).length} words)`);
+                if (accumulatedText && activeCallbacks.onAssistantResponse) {
+                    activeCallbacks.onAssistantResponse(accumulatedText);
+                }
+                broadcastToBrowsers({
+                    type: 'ConversationText',
+                    role: 'assistant',
+                    content: accumulatedText,
+                });
+                if (activeCallbacks.onAgentDone) {
+                    activeCallbacks.onAgentDone(accumulatedText);
+                }
+            });
+
+            res.on('error', err => {
+                if (req._aborted || req.destroyed || err.name === 'AbortError' || err.code === 'ECONNRESET') {
+                    currentGroqReq = null;
+                    return;
+                }
+                console.error('[Groq Stream Error]:', err.message);
+                currentGroqReq = null;
+                if (activeCallbacks.onAgentDone) activeCallbacks.onAgentDone();
+            });
+        }
+    );
+
+    req.on('error', err => {
+        if (req._aborted || req.destroyed || err.name === 'AbortError' || err.code === 'ECONNRESET') {
+            currentGroqReq = null;
+            return;
+        }
+        console.error('[Groq Request Error]:', err.message);
+        if (activeCallbacks.onError) activeCallbacks.onError(`Groq Request Error: ${err.message}`);
+        currentGroqReq = null;
+        if (activeCallbacks.onAgentDone) activeCallbacks.onAgentDone();
+    });
+
+    currentGroqReq = req;
+    req.write(postData);
+    req.end();
+}
+
+// ─── Deepgram Nova-2 Connection ──────────────────────────────────────────────
+
+function createDeepgramConnection(apiKey) {
     const key = getEffectiveApiKey(apiKey);
     if (!key) {
-        console.error('❌ [Deepgram Agent] API key not found. Please configure in settings.');
+        console.error('❌ [Deepgram STT] API key not found.');
         return null;
     }
 
-    console.log('Connecting to Deepgram Voice Agent at', DEEPGRAM_WS_URL);
-    const dgWs = new WebSocket(DEEPGRAM_WS_URL, {
+    console.log('🔌 Connecting to Deepgram Nova-2 STT...');
+    const dgWs = new WebSocket(DEEPGRAM_STT_URL, {
         headers: { Authorization: `Token ${key}` },
     });
 
-    let settingsApplied = false;
     let keepAliveTimer = null;
-    const settingsMessage = buildSettingsMessage(promptText);
 
     dgWs.on('open', () => {
-        console.log('Connected to Deepgram Voice Agent.');
-        if (activeCallbacks.onLog) activeCallbacks.onLog('Connected to Deepgram Voice Agent');
+        console.log('✅ Connected to Deepgram Nova-2 STT.');
+        wsConnected = true;
+        isConnecting = false;
+        isSessionActive = true;
+
+        broadcastToBrowsers({ type: 'Ready', wsConnected: true, liveEnabled });
+
+        // Send initial silence buffer so Deepgram registers audio within the initial 10s window (NET-0001)
+        const silenceBuffer = Buffer.alloc(9600); // 100ms of 48kHz Linear16
+        try {
+            dgWs.send(silenceBuffer);
+        } catch (e) {}
+
+        // Keep-alive every 3 seconds to prevent timeout: sends KeepAlive JSON + periodic silence buffer
+        if (keepAliveTimer) clearInterval(keepAliveTimer);
+        keepAliveTimer = setInterval(() => {
+            if (dgWs.readyState === WebSocket.OPEN) {
+                try {
+                    dgWs.send(JSON.stringify({ type: 'KeepAlive' }));
+                    if (!liveEnabled) {
+                        dgWs.send(silenceBuffer);
+                    }
+                } catch (e) {}
+            }
+        }, 3000);
+        activeKeepAliveTimer = keepAliveTimer;
+
+        if (activeCallbacks.onLog) activeCallbacks.onLog('Deepgram Nova-2 STT Connected');
     });
 
-    dgWs.on('message', (data, isBinary) => {
-        // Binary frames (TTS audio output from Deepgram)
-        // User requested: "remove the voice no need of voice to be send to the user"
-        if (isBinary) {
-            return;
-        }
-
-        let message;
+    dgWs.on('message', data => {
+        let msg;
         try {
-            message = JSON.parse(data.toString());
+            msg = JSON.parse(data.toString());
         } catch {
             return;
         }
 
-        if (message.type !== 'LatencyReport') {
-            console.log('Deepgram →', message.type);
-        }
-
-        switch (message.type) {
-            case 'Welcome': {
-                dgWs.send(JSON.stringify(settingsMessage));
-                break;
-            }
-
-            case 'SettingsApplied': {
-                settingsApplied = true;
-                activeSettingsApplied = true;
-                wsConnected = true;
-                isConnecting = false;
-                isSessionActive = true;
-                broadcastToBrowsers({ type: 'Ready', wsConnected: true, liveEnabled });
-
-                // Keep the Deepgram connection alive during silence
-                if (keepAliveTimer) clearInterval(keepAliveTimer);
-                keepAliveTimer = setInterval(() => {
-                    if (dgWs.readyState === WebSocket.OPEN) {
-                        try {
-                            dgWs.send(JSON.stringify({ type: 'KeepAlive' }));
-                            dgWs.ping();
-                        } catch (e) {}
-                    }
-                }, 5000);
-                activeKeepAliveTimer = keepAliveTimer;
-
-                if (activeCallbacks.onLog) activeCallbacks.onLog('SettingsApplied: Voice Agent ready');
-                break;
-            }
-
-            case 'ConversationText': {
-                // Forward both user transcript and agent text to browser & Electron app
-                broadcastToBrowsers({
-                    type: 'ConversationText',
-                    role: message.role,
-                    content: message.content,
-                });
-
-                if (message.role === 'user') {
-                    if (activeCallbacks.onUserTranscript) {
-                        activeCallbacks.onUserTranscript(message.content);
-                    }
-                } else if (message.role === 'assistant') {
-                    if (activeCallbacks.onAssistantResponse) {
-                        activeCallbacks.onAssistantResponse(message.content);
-                    }
-                }
-                break;
-            }
-
-            case 'AgentThinking': {
-                broadcastToBrowsers({
-                    type: 'AgentThinking',
-                    content: message.content || '',
-                });
-                if (activeCallbacks.onThinking) {
-                    activeCallbacks.onThinking(message.content || '');
-                }
-                break;
-            }
-
-            case 'UserStartedSpeaking': {
-                broadcastToBrowsers({ type: 'UserStartedSpeaking' });
+        switch (msg.type) {
+            case 'SpeechStarted': {
+                console.log('🎙️ [Deepgram] Speech started');
                 if (activeCallbacks.onUserStartedSpeaking) {
                     activeCallbacks.onUserStartedSpeaking();
                 }
                 break;
             }
 
-            case 'EndOfTurn':
-            case 'EagerEndOfTurn': {
-                broadcastToBrowsers({ type: message.type });
-                if (activeCallbacks.onThinking) {
-                    activeCallbacks.onThinking('Processing...');
+            case 'Results': {
+                const transcript = msg.channel?.alternatives?.[0]?.transcript?.trim() || '';
+                if (!transcript) return;
+
+                if (msg.is_final) {
+                    accumulatedTranscript = accumulatedTranscript ? `${accumulatedTranscript} ${transcript}` : transcript;
+
+                    // Update live preview immediately (isFinal: false)
+                    if (activeCallbacks.onUserTranscript) {
+                        activeCallbacks.onUserTranscript(accumulatedTranscript, false);
+                    }
+
+                    if (msg.speech_final) {
+                        const finalText = accumulatedTranscript.trim();
+                        accumulatedTranscript = '';
+                        console.log(`🎯 [Deepgram STT speech_final Committed]: "${finalText}"`);
+
+                        broadcastToBrowsers({
+                            type: 'ConversationText',
+                            role: 'user',
+                            content: finalText,
+                        });
+
+                        // Commit complete utterance (isFinal: true)
+                        if (activeCallbacks.onUserTranscript) {
+                            activeCallbacks.onUserTranscript(finalText, true);
+                        }
+                    }
+                } else {
+                    // Interim replaces the live preview immediately (isFinal: false)
+                    const livePreview = accumulatedTranscript ? `${accumulatedTranscript} ${transcript}` : transcript;
+                    if (activeCallbacks.onUserTranscript) {
+                        activeCallbacks.onUserTranscript(livePreview, false);
+                    }
                 }
                 break;
             }
 
-            case 'AgentAudioDone': {
-                broadcastToBrowsers({ type: 'AgentAudioDone' });
-                if (activeCallbacks.onAgentDone) {
-                    activeCallbacks.onAgentDone();
+            case 'UtteranceEnd': {
+                const finalText = accumulatedTranscript.trim();
+                if (finalText) {
+                    accumulatedTranscript = '';
+                    console.log(`🎯 [Deepgram STT UtteranceEnd Committed]: "${finalText}"`);
+
+                    broadcastToBrowsers({
+                        type: 'ConversationText',
+                        role: 'user',
+                        content: finalText,
+                    });
+
+                    // Commit complete utterance fallback (isFinal: true)
+                    if (activeCallbacks.onUserTranscript) {
+                        activeCallbacks.onUserTranscript(finalText, true);
+                    }
                 }
                 break;
             }
 
-            case 'Error':
-            case 'Warning': {
-                console.error(`Deepgram ${message.type}:`, message.description || message.code || message);
-                broadcastToBrowsers({
-                    type: message.type,
-                    description: message.description,
-                    code: message.code,
-                });
-                if (activeCallbacks.onError) {
-                    activeCallbacks.onError(message.description || message.type);
-                }
+            case 'Error': {
+                console.error('[Deepgram Error]:', msg.description || msg.message || msg);
+                if (activeCallbacks.onError) activeCallbacks.onError(msg.description || 'Deepgram error');
                 break;
             }
 
             default:
-                break; // ignore AgentAudioDone, etc.
+                break;
         }
     });
 
     dgWs.on('error', err => {
-        console.error('Deepgram error:', err.message);
-        broadcastToBrowsers({ type: 'Error', description: err.message });
-        if (activeCallbacks.onError) {
-            activeCallbacks.onError(err.message);
-        }
+        console.error('[Deepgram WS Error]:', err.message);
+        if (activeCallbacks.onError) activeCallbacks.onError(`Deepgram WS Error: ${err.message}`);
     });
 
     dgWs.on('close', (code, reason) => {
-        console.log(`Deepgram closed: ${code} ${reason}`);
+        console.log(`[Deepgram WS Closed] (${code} ${reason})`);
         if (keepAliveTimer) clearInterval(keepAliveTimer);
-        activeSettingsApplied = false;
+        keepAliveTimer = null;
         wsConnected = false;
-        liveEnabled = false;
+        const wasActive = isSessionActive;
         isSessionActive = false;
         isConnecting = false;
-        broadcastToBrowsers({ type: 'Disconnected', wsConnected: false, liveEnabled: false });
+        activeDeepgramWs = null;
         if (activeCallbacks.onStopped) {
             activeCallbacks.onStopped(code);
+        }
+        // Auto-reconnect if unexpectedly closed with timeout (1011 NET-0001)
+        if (wasActive && code === 1011 && !isConnecting) {
+            console.log('🔄 [Deepgram STT] Connection timed out, automatically reconnecting...');
+            setTimeout(() => {
+                startTranscription();
+            }, 1000);
         }
     });
 
     return dgWs;
 }
 
-// ─── WebSocket Server Connections (from Browser or local clients) ────────────
-wss.on('connection', browserWs => {
-    console.log('Browser connected.');
-    browserClients.add(browserWs);
+// ─── Local WebSocket Server Connections (Browser clients) ───────────────────
 
-    // If an active session is already running, notify browser immediately
-    if (activeSettingsApplied) {
+wss.on('connection', browserWs => {
+    browserClients.add(browserWs);
+    if (wsConnected) {
         browserWs.send(JSON.stringify({ type: 'Ready' }));
     }
 
-    // Messages from browser: binary = mic audio, text = control
     browserWs.on('message', (data, isBinary) => {
         if (isBinary) {
-            // Forward raw PCM16 audio straight to Deepgram
-            if (activeDeepgramWs && activeDeepgramWs.readyState === WebSocket.OPEN && activeSettingsApplied) {
+            if (activeDeepgramWs && activeDeepgramWs.readyState === WebSocket.OPEN && liveEnabled) {
                 activeDeepgramWs.send(data);
             }
             return;
         }
 
-        // JSON control messages
         let msg;
         try {
             msg = JSON.parse(data.toString());
@@ -366,44 +490,28 @@ wss.on('connection', browserWs => {
         }
 
         if (msg.type === 'start') {
-            const apiKey = getEffectiveApiKey(msg.apiKey);
-            const prompt = msg.prompt || getProjectSystemPrompt(msg.profile, msg.customPrompt);
-            startTranscription({ apiKey, systemPrompt: prompt });
+            startTranscription(msg);
         } else if (msg.type === 'stop') {
             stopTranscription();
         } else if (msg.type === 'InjectUserMessage') {
-            if (activeDeepgramWs && activeDeepgramWs.readyState === WebSocket.OPEN) {
-                activeDeepgramWs.send(
-                    JSON.stringify({
-                        type: 'InjectUserMessage',
-                        content: msg.content,
-                    })
-                );
-            }
-        } else if (msg.type === 'Close') {
-            // User stopped speaking – flush the audio stream
-            if (activeDeepgramWs && activeDeepgramWs.readyState === WebSocket.OPEN) {
-                try {
-                    activeDeepgramWs.send(JSON.stringify({ type: 'Close' }));
-                } catch (e) {}
-            }
+            streamGroqResponse(msg.content);
         }
     });
 
     browserWs.on('close', () => {
-        console.log('Browser disconnected.');
         browserClients.delete(browserWs);
     });
 });
 
 // ─── Start Express / HTTP Server ─────────────────────────────────────────────
+
 let serverStarted = false;
 function startServer() {
-    if (serverStarted) return;
+    if (serverStarted || (server && server.listening)) return;
+    serverStarted = true;
     try {
         server.listen(PORT, () => {
             console.log(`Server on http://localhost:${PORT}`);
-            serverStarted = true;
         });
         server.on('error', err => {
             if (err.code === 'EADDRINUSE') {
@@ -418,210 +526,13 @@ function startServer() {
     }
 }
 
-// Automatically start server only if in server mode or run directly as script
-const isServerMode = process.env.SERVER_MODE === 'true' || require.main === module;
-if (isServerMode) {
-    startServer();
-}
+startServer();
 
-// ─── Backend WebSocket Client (for connecting to remote backend e.g. 13.233.70.37:3000) ───
-
-async function startBackendClient(backendWsUrl, options = {}) {
-    if (activeBackendWs && activeBackendWs.readyState === WebSocket.OPEN && activeSettingsApplied) {
-        console.log('ℹ️ [LiveTranscription] Backend connection already active');
-        return true;
-    }
-
-    stopTranscription();
-    isConnecting = true;
-    activeSettingsApplied = false;
-    wsConnected = false;
-
-    console.log(`🔌 [LiveTranscription] Connecting to remote backend at ${backendWsUrl}...`);
-
-    return new Promise(resolve => {
-        let isResolved = false;
-        const finish = result => {
-            if (!isResolved) {
-                isResolved = true;
-                resolve(result);
-            }
-        };
-
-        const timeout = setTimeout(() => {
-            if (!activeSettingsApplied) {
-                console.warn('[LiveTranscription] Connection to backend timed out (10s)');
-                finish(false);
-            }
-        }, 10000);
-
-        try {
-            const ws = new WebSocket(backendWsUrl);
-            activeBackendWs = ws;
-
-            ws.on('open', () => {
-                console.log(`✅ [LiveTranscription] Connected to remote backend at ${backendWsUrl}`);
-                if (activeCallbacks.onLog) activeCallbacks.onLog(`Connected to backend: ${backendWsUrl}`);
-
-                // Send start initialization message
-                const apiKey = getEffectiveApiKey(options.apiKey || options.sttApiKey);
-                const prompt = options.systemPrompt || getProjectSystemPrompt(options.profile, options.customPrompt);
-
-                try {
-                    ws.send(
-                        JSON.stringify({
-                            type: 'start',
-                            apiKey,
-                            prompt,
-                            profile: options.profile,
-                            customPrompt: options.customPrompt,
-                        })
-                    );
-                } catch (e) {
-                    console.error('[LiveTranscription] Failed to send start message:', e);
-                }
-
-                if (clientPingTimer) clearInterval(clientPingTimer);
-                clientPingTimer = setInterval(() => {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        try {
-                            ws.ping();
-                        } catch (e) {}
-                    }
-                }, 10000);
-            });
-
-            ws.on('message', (data, isBinary) => {
-                if (isBinary) {
-                    // Audio playback from server is disabled per requirement
-                    return;
-                }
-
-                let message;
-                try {
-                    message = JSON.parse(data.toString());
-                } catch {
-                    return;
-                }
-
-                if (message.type !== 'LatencyReport') {
-                    console.log('[Backend → App]', message.type);
-                }
-
-                switch (message.type) {
-                    case 'Ready': {
-                        activeSettingsApplied = true;
-                        wsConnected = true;
-                        isConnecting = false;
-                        isSessionActive = true;
-                        clearTimeout(timeout);
-                        if (activeCallbacks.onLog) activeCallbacks.onLog('Backend Voice Agent Ready');
-                        finish(true);
-                        break;
-                    }
-
-                    case 'ConversationText': {
-                        if (message.role === 'user') {
-                            if (activeCallbacks.onUserTranscript) {
-                                activeCallbacks.onUserTranscript(message.content);
-                            }
-                        } else if (message.role === 'assistant') {
-                            if (activeCallbacks.onAssistantResponse) {
-                                activeCallbacks.onAssistantResponse(message.content);
-                            }
-                        }
-                        break;
-                    }
-
-                    case 'AgentThinking': {
-                        if (activeCallbacks.onThinking) {
-                            activeCallbacks.onThinking(message.content || 'Thinking...');
-                        }
-                        break;
-                    }
-
-                    case 'UserStartedSpeaking': {
-                        if (activeCallbacks.onUserStartedSpeaking) {
-                            activeCallbacks.onUserStartedSpeaking();
-                        }
-                        break;
-                    }
-
-                    case 'EndOfTurn':
-                    case 'EagerEndOfTurn': {
-                        if (activeCallbacks.onThinking) {
-                            activeCallbacks.onThinking('Processing...');
-                        }
-                        break;
-                    }
-
-                    case 'AgentAudioDone': {
-                        if (activeCallbacks.onAgentDone) {
-                            activeCallbacks.onAgentDone();
-                        }
-                        break;
-                    }
-
-                    case 'Error':
-                    case 'Warning': {
-                        console.error(`[Backend ${message.type}]:`, message.description || message.code || message);
-                        if (activeCallbacks.onError) {
-                            activeCallbacks.onError(message.description || message.type);
-                        }
-                        break;
-                    }
-
-                    case 'Disconnected': {
-                        activeSettingsApplied = false;
-                        wsConnected = false;
-                        isSessionActive = false;
-                        isConnecting = false;
-                        if (activeCallbacks.onStopped) {
-                            activeCallbacks.onStopped();
-                        }
-                        break;
-                    }
-
-                    default:
-                        break;
-                }
-            });
-
-            ws.on('error', err => {
-                console.error('[LiveTranscription] Backend WS Error:', err.message);
-                if (activeCallbacks.onError) {
-                    activeCallbacks.onError(`Backend WS Error: ${err.message}`);
-                }
-                finish(false);
-            });
-
-            ws.on('close', (code, reason) => {
-                console.log(`[LiveTranscription] Backend WS closed (${code} ${reason})`);
-                if (clientPingTimer) clearInterval(clientPingTimer);
-                clientPingTimer = null;
-                activeSettingsApplied = false;
-                wsConnected = false;
-                isSessionActive = false;
-                isConnecting = false;
-                activeBackendWs = null;
-                if (activeCallbacks.onStopped) {
-                    activeCallbacks.onStopped(code);
-                }
-                finish(false);
-            });
-        } catch (err) {
-            console.error('[LiveTranscription] Exception creating backend WS:', err);
-            finish(false);
-        }
-    });
-}
-
-// ─── Module Interface for Cheating Daddy Desktop App ─────────────────────────
+// ─── Module Interface for Desktop App ────────────────────────────────────────
 
 function ensure48kPcm(buffer, sampleRate = 48000) {
     if (!buffer || buffer.length === 0) return buffer;
     if (sampleRate === 24000) {
-        // Upsample 24k -> 48k (duplicate each 16-bit linear sample)
         const samples = buffer.length / 2;
         const out = Buffer.alloc(samples * 4);
         for (let i = 0; i < samples; i++) {
@@ -635,27 +546,28 @@ function ensure48kPcm(buffer, sampleRate = 48000) {
 }
 
 async function startTranscription(options = {}, callbacks = {}) {
+    startServer();
+
     if (callbacks) {
         activeCallbacks = { ...activeCallbacks, ...callbacks };
     }
 
-    const backendWsUrl = getEffectiveBackendWsUrl(options.backendUrl);
-    if (backendWsUrl) {
-        const connected = await startBackendClient(backendWsUrl, options);
-        if (connected) return true;
-        console.warn(`[LiveTranscription] Could not connect to remote backend at ${backendWsUrl}. Checking local fallback...`);
-    }
-
-    // Direct Deepgram connection fallback
     const apiKey = getEffectiveApiKey(options.apiKey || options.sttApiKey);
     if (!apiKey) {
-        console.error('❌ [LiveTranscription] Deepgram API Key not configured and backend unreachable!');
+        console.error('❌ [LiveTranscription] Deepgram API Key not configured!');
         if (activeCallbacks.onError) activeCallbacks.onError('Deepgram API key not configured');
         return false;
     }
 
-    if (activeDeepgramWs && activeDeepgramWs.readyState === WebSocket.OPEN && activeSettingsApplied) {
-        console.log('ℹ️ [LiveTranscription] Deepgram session already active');
+    const groqKey = getEffectiveGroqKey();
+    if (!groqKey) {
+        console.error('❌ [LiveTranscription] Groq API Key not configured in .env or storage!');
+        if (activeCallbacks.onError) activeCallbacks.onError('Groq API key not configured');
+        return false;
+    }
+
+    if (activeDeepgramWs && activeDeepgramWs.readyState === WebSocket.OPEN) {
+        console.log('ℹ️ [LiveTranscription] Deepgram Nova-2 session already active');
         return true;
     }
 
@@ -663,99 +575,58 @@ async function startTranscription(options = {}, callbacks = {}) {
 
     isConnecting = true;
     currentPrompt = options.systemPrompt || getProjectSystemPrompt(options.profile, options.customPrompt);
+    accumulatedTranscript = '';
 
-    activeDeepgramWs = createDeepgramConnection(apiKey, currentPrompt);
+    activeDeepgramWs = createDeepgramConnection(apiKey);
     if (!activeDeepgramWs) {
         isConnecting = false;
         return false;
     }
 
-    // Wait up to 10 seconds for SettingsApplied
-    const timeout = Date.now() + 10000;
-    while (!activeSettingsApplied && Date.now() < timeout) {
+    // Wait up to 5 seconds for connection
+    const timeout = Date.now() + 5000;
+    while (!wsConnected && Date.now() < timeout) {
         if (!activeDeepgramWs || activeDeepgramWs.readyState === WebSocket.CLOSED) {
             break;
         }
         await new Promise(r => setTimeout(r, 100));
     }
 
-    return activeSettingsApplied;
+    return wsConnected;
 }
 
 function sendAudio(pcmBuffer, sampleRate = 48000) {
-    const audio48k = ensure48kPcm(pcmBuffer, sampleRate);
-    if (!audio48k || audio48k.length === 0) return;
-
-    if (activeBackendWs && activeBackendWs.readyState === WebSocket.OPEN) {
-        try {
-            activeBackendWs.send(audio48k);
-        } catch (e) {
-            console.error('[SendAudio to Backend Error]:', e.message);
-        }
+    if (!activeDeepgramWs || activeDeepgramWs.readyState !== WebSocket.OPEN) {
         return;
     }
-
-    if (activeDeepgramWs && activeDeepgramWs.readyState === WebSocket.OPEN && activeSettingsApplied) {
-        try {
-            activeDeepgramWs.send(audio48k);
-        } catch (e) {
-            console.error('[SendAudio Error]:', e.message);
-        }
+    if (!liveEnabled) {
+        return; // Don't forward silence or unneeded audio to Deepgram
+    }
+    try {
+        const audio48k = ensure48kPcm(pcmBuffer, sampleRate);
+        activeDeepgramWs.send(audio48k);
+    } catch (e) {
+        console.error('[SendAudio Error]:', e.message);
     }
 }
 
 function sendTextMessage(content) {
-    if (activeBackendWs && activeBackendWs.readyState === WebSocket.OPEN) {
-        try {
-            activeBackendWs.send(
-                JSON.stringify({
-                    type: 'InjectUserMessage',
-                    content,
-                })
-            );
-            return true;
-        } catch (e) {
-            console.error('[SendTextMessage to Backend Error]:', e.message);
-            return false;
-        }
-    }
-
-    if (activeDeepgramWs && activeDeepgramWs.readyState === WebSocket.OPEN) {
-        try {
-            activeDeepgramWs.send(
-                JSON.stringify({
-                    type: 'InjectUserMessage',
-                    content,
-                })
-            );
-            return true;
-        } catch (e) {
-            console.error('[SendTextMessage Error]:', e.message);
-            return false;
-        }
-    }
-    return false;
+    if (!content || !content.trim()) return false;
+    streamGroqResponse(content.trim());
+    return true;
 }
 
 function finalizeTranscription() {
-    // In Deepgram Voice Agent (Nova-3), natural turn-taking and end-of-turn detection
-    // are automatically handled by the engine. Do not send invalid text frames.
+    if (accumulatedTranscript && accumulatedTranscript.trim()) {
+        const q = accumulatedTranscript.trim();
+        accumulatedTranscript = '';
+        if (activeCallbacks.onUserTranscript) activeCallbacks.onUserTranscript(q);
+        streamGroqResponse(q);
+    }
 }
 
 function stopTranscription() {
-    if (clientPingTimer) {
-        clearInterval(clientPingTimer);
-        clientPingTimer = null;
-    }
-    if (activeBackendWs) {
-        try {
-            if (activeBackendWs.readyState === WebSocket.OPEN) {
-                activeBackendWs.send(JSON.stringify({ type: 'stop' }));
-            }
-        } catch (e) {}
-        safeClose(activeBackendWs);
-        activeBackendWs = null;
-    }
+    abortGroq();
     if (activeKeepAliveTimer) {
         clearInterval(activeKeepAliveTimer);
         activeKeepAliveTimer = null;
@@ -764,21 +635,19 @@ function stopTranscription() {
         safeClose(activeDeepgramWs);
         activeDeepgramWs = null;
     }
-    activeSettingsApplied = false;
     wsConnected = false;
     liveEnabled = false;
     isSessionActive = false;
     isConnecting = false;
+    accumulatedTranscript = '';
 }
 
 function setLiveState(enabled) {
     liveEnabled = Boolean(enabled);
-    console.log(`[Deepgram Agent] Live state: ${liveEnabled ? 'LIVE ON (Microphone Active)' : 'LIVE OFF (Silence Stream)'}`);
-    if (activeBackendWs && activeBackendWs.readyState === WebSocket.OPEN) {
-        try {
-            activeBackendWs.send(JSON.stringify({ type: 'LiveState', liveEnabled, wsConnected }));
-        } catch (e) {}
+    if (!liveEnabled) {
+        accumulatedTranscript = '';
     }
+    console.log(`[Deepgram Agent] Live state: ${liveEnabled ? 'LIVE ON (Microphone Active)' : 'LIVE OFF (Silence Stream)'}`);
     broadcastToBrowsers({ type: 'LiveState', liveEnabled, wsConnected });
     return liveEnabled;
 }
@@ -788,14 +657,11 @@ function isLiveEnabled() {
 }
 
 function isWsConnected() {
-    if (activeBackendWs) {
-        return Boolean(wsConnected && activeBackendWs.readyState === WebSocket.OPEN);
-    }
     return Boolean(wsConnected && activeDeepgramWs && activeDeepgramWs.readyState === WebSocket.OPEN);
 }
 
 function isAvailable() {
-    return Boolean(getEffectiveBackendWsUrl() || getEffectiveApiKey());
+    return Boolean(getEffectiveApiKey() && getEffectiveGroqKey());
 }
 
 function getStatus() {
@@ -804,9 +670,7 @@ function getStatus() {
         liveEnabled: liveEnabled,
         isRunning: isWsConnected(),
         isConnecting,
-        settingsApplied: activeSettingsApplied,
         hasApiKey: isAvailable(),
-        backendUrl: getEffectiveBackendWsUrl(),
         port: PORT,
     };
 }
@@ -841,6 +705,6 @@ module.exports = {
     getStatus,
     shutdown,
     getEffectiveApiKey,
+    getEffectiveGroqKey,
     getProjectSystemPrompt,
-    getEffectiveBackendWsUrl,
 };

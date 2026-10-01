@@ -600,9 +600,14 @@ export class CheatingDaddyApp extends LitElement {
     updateCurrentResponse(response) {
         if (this.responses.length > 0) {
             this.responses = [...this.responses.slice(0, -1), response];
+            if (this.currentResponseIndex === -1 || this.currentResponseIndex >= this.responses.length - 2) {
+                this.currentResponseIndex = this.responses.length - 1;
+            }
         } else {
             this.addNewResponse(response);
         }
+        this._awaitingNewResponse = false;
+        this._currentResponseIsComplete = true;
         this.requestUpdate();
     }
 
@@ -825,10 +830,10 @@ export class CheatingDaddyApp extends LitElement {
                         .shouldAnimateResponse=${this.shouldAnimateResponse}
                         @response-index-changed=${this.handleResponseIndexChanged}
                         @response-animation-complete=${() => {
-                        this.shouldAnimateResponse = false;
-                        this._currentResponseIsComplete = true;
-                        this.requestUpdate();
-                    }}
+                            this.shouldAnimateResponse = false;
+                            this._currentResponseIsComplete = true;
+                            this.requestUpdate();
+                        }}
                     ></assistant-view>
                 `;
 
@@ -918,7 +923,7 @@ export class CheatingDaddyApp extends LitElement {
                 </div>
                 <nav class="sidebar-nav">
                     ${items.map(
-            item => html`
+                        item => html`
                             <button
                                 class="nav-item ${this.currentView === item.id ? 'active' : ''}"
                                 @click=${() => this.navigate(item.id)}
@@ -927,11 +932,11 @@ export class CheatingDaddyApp extends LitElement {
                                 ${item.icon} ${item.label}
                             </button>
                         `
-        )}
+                    )}
                 </nav>
                 <div class="sidebar-footer">
                     ${this._updateAvailable
-                ? html`
+                        ? html`
                               <button class="update-btn" @click=${() => this.handleExternalLinkClick('https://cheatingdaddy.com/download')}>
                                   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
                                       <path
@@ -946,7 +951,7 @@ export class CheatingDaddyApp extends LitElement {
                                   Update available
                               </button>
                           `
-                : html` <div class="version-text">v${this._localVersion}</div> `}
+                        : html` <div class="version-text">v${this._localVersion}</div> `}
                 </div>
             </div>
         `;

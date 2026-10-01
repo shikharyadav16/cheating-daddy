@@ -219,7 +219,7 @@ export class CustomizeView extends LitElement {
         this.fontSize = 20;
         this.audioMode = 'speaker_only';
         this.autoListening = true;
-        this.liveTranscriptionModel = 'nova-3';
+        this.liveTranscriptionModel = 'qwen/qwen3.8-27b';
         this.availableModels = [];
         this.customPrompt = '';
         this.theme = 'dark';
@@ -239,7 +239,7 @@ export class CustomizeView extends LitElement {
             this.fontSize = prefs.fontSize ?? 20;
             this.audioMode = prefs.audioMode ?? 'speaker_only';
             this.autoListening = prefs.autoListening ?? true;
-            this.liveTranscriptionModel = prefs.liveTranscriptionModel || 'ggml-large-v3-turbo';
+            this.liveTranscriptionModel = prefs.liveTranscriptionModel || 'qwen/qwen3.8-27b';
             this.customPrompt = prefs.customPrompt ?? '';
             this.theme = prefs.theme ?? 'dark';
             this.backendUrl = prefs.backendUrl || 'http://13.233.70.37:3000';
@@ -418,11 +418,9 @@ export class CustomizeView extends LitElement {
             return this.availableModels;
         }
         return [
-            { id: 'nova-3', label: 'Deepgram Nova-3 (Recommended / SOTA)' },
-            { id: 'nova-2', label: 'Deepgram Nova-2 (General Purpose)' },
-            { id: 'nova-2-meeting', label: 'Deepgram Nova-2 Meeting (Meetings & Calls)' },
-            { id: 'enhanced', label: 'Deepgram Enhanced (Multilingual)' },
-            { id: 'base', label: 'Deepgram Base (Standard)' },
+            { id: 'qwen/qwen3.8-27b', label: 'Groq Qwen 3.8 27B (Recommended - Fast & Direct Markdown)' },
+            { id: 'openai/gpt-oss-120b', label: 'Groq GPT-OSS 120B (Deep Reasoning)' },
+            { id: 'openai/gpt-oss-20b', label: 'Groq GPT-OSS 20B (Ultra Low Latency)' },
         ];
     }
 
@@ -657,7 +655,7 @@ export class CustomizeView extends LitElement {
                         ? html` <div class="warning-callout">May cause unexpected behavior. Only change this if you know what you're doing.</div> `
                         : ''}
                     <div class="form-group">
-                        <label class="form-label">Live Transcription Model (Deepgram)</label>
+                        <label class="form-label">Groq AI Model (Responses)</label>
                         <select class="control" .value=${this.liveTranscriptionModel} @change=${this.handleLiveTranscriptionModelChange}>
                             ${models.map(
                                 m =>

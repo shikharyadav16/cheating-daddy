@@ -334,12 +334,12 @@ export class MainView extends LitElement {
 
     constructor() {
         super();
-        this.onStart = () => { };
-        this.onExternalLink = () => { };
+        this.onStart = () => {};
+        this.onExternalLink = () => {};
         this.selectedProfile = 'interview';
         this.selectedLanguage = 'en-US';
-        this.onProfileChange = () => { };
-        this.onLanguageChange = () => { };
+        this.onProfileChange = () => {};
+        this.onLanguageChange = () => {};
         this.isInitializing = false;
 
         this._apiKey = '';
@@ -651,9 +651,9 @@ export class MainView extends LitElement {
                             <button
                                 class="toggle-vis-btn"
                                 @click=${() => {
-                this._keyVisible = !this._keyVisible;
-                this.requestUpdate();
-            }}
+                                    this._keyVisible = !this._keyVisible;
+                                    this.requestUpdate();
+                                }}
                                 title="${this._keyVisible ? 'Hide Key' : 'Show Key'}"
                             >
                                 ${eyeIcon}
@@ -726,15 +726,15 @@ export class MainView extends LitElement {
                     <div class="engine-info">
                         <div class="engine-row">
                             <span class="engine-label">Voice Pipeline</span>
-                            <span class="engine-value">Deepgram Nova-3 (linear16, 48 kHz)</span>
+                            <span class="engine-value">Deepgram Nova-2 (STT)</span>
                         </div>
                         <div class="engine-row">
                             <span class="engine-label">Reasoning LLM</span>
-                            <span class="engine-value">Gemini 3.1 Flash Lite</span>
+                            <span class="engine-value">Groq (Ultra-Fast Streaming)</span>
                         </div>
                         <div class="engine-row">
-                            <span class="engine-label">Backend Server</span>
-                            <span class="engine-value">${this._backendUrl || 'http://13.233.70.37:3000'}</span>
+                            <span class="engine-label">Mode</span>
+                            <span class="engine-value">Voice in ➔ Instant Text on Screen</span>
                         </div>
                     </div>
                 </div>
